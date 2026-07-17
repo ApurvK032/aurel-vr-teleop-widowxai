@@ -63,7 +63,7 @@ In the Quest Browser, open:
 http://localhost:8443/
 ```
 
-Select **Enter VR**. On first use, squeeze both grip buttons and rotate both hands for five seconds while keeping the anatomical wrists still. The browser estimates and stores the left controller's wrist-pivot offset. During normal use, left grip is the clutch and left trigger controls the simulated gripper.
+Select **Enter Passthrough** when available; the page falls back to a dark-blue VR tracking space if the browser does not expose WebXR passthrough. On first use, squeeze both grip buttons and rotate both hands for five seconds while keeping the anatomical wrists still. The browser estimates and stores the left controller's wrist-pivot offset. During normal use, left grip is the clutch and left trigger controls the simulated gripper.
 
 Terminal 3—start the live MuJoCo consumer:
 

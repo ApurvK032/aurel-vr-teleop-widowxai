@@ -13,6 +13,7 @@ const canvas = document.getElementById("xr-canvas");
 
 let socket = null;
 let session = null;
+let sessionMode = "immersive-vr";
 let referenceSpace = null;
 let gl = null;
 let latestPacket = null;
@@ -37,7 +38,15 @@ function connectRelay() {
   socket = new WebSocket(`${scheme}://${location.host}/ws`);
   socket.onopen = async () => {
     setStatus("Relay connected", true);
-    enterButton.disabled = !(navigator.xr && await navigator.xr.isSessionSupported("immersive-vr"));
+    let arSupported = false;
+    let vrSupported = false;
+    if (navigator.xr) {
+      arSupported = await navigator.xr.isSessionSupported("immersive-ar");
+      vrSupported = await navigator.xr.isSessionSupported("immersive-vr");
+    }
+    sessionMode = arSupported ? "immersive-ar" : "immersive-vr";
+    enterButton.textContent = arSupported ? "Enter Passthrough" : "Enter VR";
+    enterButton.disabled = !(arSupported || vrSupported);
     socket.send(JSON.stringify({
       type: "clock_ping",
       sequence: 0,
@@ -150,7 +159,8 @@ function finishWristCalibration() {
 function onXRFrame(frameTime, frame) {
   session.requestAnimationFrame(onXRFrame);
   gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
-  gl.clearColor(0.025, 0.055, 0.10, 1.0);
+  if (sessionMode === "immersive-ar") gl.clearColor(0.0, 0.0, 0.0, 0.0);
+  else gl.clearColor(0.025, 0.055, 0.10, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
@@ -214,10 +224,17 @@ setInterval(() => {
 
 enterButton.addEventListener("click", async () => {
   try {
-    session = await navigator.xr.requestSession("immersive-vr", { requiredFeatures: ["local-floor"] });
-    gl = canvas.getContext("webgl", { xrCompatible: true, antialias: false });
+    session = await navigator.xr.requestSession(sessionMode, { requiredFeatures: ["local-floor"] });
+    gl = canvas.getContext("webgl", {
+      xrCompatible: true,
+      antialias: false,
+      alpha: sessionMode === "immersive-ar",
+      premultipliedAlpha: true,
+    });
     await gl.makeXRCompatible();
-    session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+    session.updateRenderState({
+      baseLayer: new XRWebGLLayer(session, gl, { alpha: sessionMode === "immersive-ar" }),
+    });
     referenceSpace = await session.requestReferenceSpace("local-floor");
     session.addEventListener("end", () => {
       session = null;
@@ -228,7 +245,7 @@ enterButton.addEventListener("click", async () => {
     });
     enterButton.disabled = true;
     exitButton.disabled = false;
-    setStatus("Streaming left controller", true);
+    setStatus(sessionMode === "immersive-ar" ? "Streaming in passthrough" : "Streaming left controller", true);
     session.requestAnimationFrame(onXRFrame);
   } catch (error) {
     setStatus(`Unable to enter VR: ${error.message}`);
