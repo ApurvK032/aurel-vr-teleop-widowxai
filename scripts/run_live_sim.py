@@ -12,7 +12,7 @@ from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.safety import FreshSequenceWatchdog
+from widowxai_quest_teleop.safety import FreshSequenceWatchdog, wait_for_cycle_period
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 from widowxai_quest_teleop.transport import QuestReceiver
 
@@ -27,7 +27,7 @@ def main() -> None:
 
     config = load_config(args.config)
     quest_config = config["quest"]
-    model = WidowXAIModel(config["model"]["xml_path"])
+    model = WidowXAIModel(config["model"].get("simulation_scene_xml_path", config["model"]["xml_path"]))
     solver = DecoupledIK.from_config(model, config)
     q_start = model.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
     shaper = JointCommandShaper.from_config(q_start, model.joint_limits, config)
@@ -65,9 +65,9 @@ def main() -> None:
     target_pose = None
     last_sample = None
     diagnostics = None
+    motion_active = False
     tick = 0
     started = time.perf_counter()
-    next_deadline = started
 
     try:
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
@@ -92,13 +92,24 @@ def main() -> None:
                         clutch.force_reanchor()
                         target_pose = None
 
-                if target_pose is not None and tick % ik_stride == 0:
-                    ik_start = time.perf_counter_ns()
-                    q_des, diagnostics = solver.solve(target_pose, q_feedback)
-                    ik_end = time.perf_counter_ns()
+                target_active = target_pose is not None and freshness.fresh and mapper.engaged
+                just_engaged = target_active and not motion_active
+                if target_active:
+                    motion_active = True
+                    if not just_engaged and tick % ik_stride == 0:
+                        ik_start = time.perf_counter_ns()
+                        q_des, diagnostics = solver.solve(target_pose, q_des)
+                        ik_end = time.perf_counter_ns()
+                    else:
+                        ik_start = ik_end = 0
+                    q_cmd = shaper.step(q_des, dt)
                 else:
                     ik_start = ik_end = 0
-                q_cmd = shaper.step(q_des, dt)
+                    if motion_active:
+                        q_des = shaper.hold()
+                        diagnostics = None
+                    motion_active = False
+                    q_cmd = shaper.q_command.copy()
                 sim_data.ctrl[:6] = q_cmd
                 if last_sample is not None:
                     sim_data.ctrl[6] = 0.044 * (1.0 - np.clip(last_sample.trigger, 0.0, 1.0))
@@ -147,12 +158,7 @@ def main() -> None:
                     if not viewer.is_running():
                         break
                 tick += 1
-                next_deadline += dt
-                remaining = next_deadline - time.perf_counter()
-                if remaining > 0.0:
-                    time.sleep(remaining)
-                elif remaining < -0.1:
-                    next_deadline = time.perf_counter()
+                wait_for_cycle_period(tick_started, dt)
             print(f"telemetry: {telemetry.run_dir}")
     except KeyboardInterrupt:
         print("stopped; simulation held its last safe command")

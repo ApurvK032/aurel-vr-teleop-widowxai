@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import perf_counter_ns
+from time import perf_counter, perf_counter_ns, sleep
 
 from .types import QuestSample
+
+
+def wait_for_cycle_period(cycle_started_s: float, period_s: float, *, clock=perf_counter, sleeper=sleep) -> None:
+    """Wait until one full cycle has elapsed, without scheduling catch-up bursts."""
+    if period_s <= 0.0:
+        raise ValueError("period_s must be positive")
+    deadline = float(cycle_started_s) + float(period_s)
+    while (remaining := deadline - clock()) > 1e-9:
+        sleeper(remaining)
 
 
 @dataclass(frozen=True)
@@ -58,4 +67,3 @@ class FreshSequenceWatchdog:
             age_s=max(0.0, age_ns / 1e9),
             reconnect_generation=self.last_reconnect_generation,
         )
-

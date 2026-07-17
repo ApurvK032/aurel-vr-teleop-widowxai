@@ -1,6 +1,6 @@
 # WidowXAI + Meta Quest 3 Teleoperation
 
-Native-Windows, simulation-first teleoperation for one Trossen WidowXAI follower arm. A WebXR page runs in the Quest Browser and streams the left controller through a capacity-one/latest-state WebSocket relay. The Windows Python process applies the confirmed calibration, clutch semantics, decoupled 3+3 inverse kinematics, command shaping, safety checks, and MuJoCo simulation.
+Native-Windows, simulation-first teleoperation for one Trossen WidowXAI follower arm. A WebXR page runs in the Quest Browser and streams the left controller through a capacity-one/latest-state WebSocket relay. The Windows Python process applies the confirmed calibration, clutch semantics, decoupled 3+3 inverse kinematics, [Ruckig](https://github.com/pantor/ruckig) online trajectory generation, safety checks, and MuJoCo simulation.
 
 Physical-arm output is deliberately disabled. The connected Quest can drive MuJoCo once Windows ADB recognizes it; no script in the current baseline can command the real arm.
 
@@ -37,7 +37,7 @@ python -m pytest -q
 python scripts\run_sim.py --duration 5 --realtime --viewer
 ```
 
-The verified environment uses Python 3.12 and MuJoCo 3.8.1. The headless test suite validates the official limits, FK Jacobians, wrist-anchor invariance, reachable/unreachable IK behavior, calibration conventions, wrist-pivot estimation, latest-state buffering, stale detection, and command limits.
+The verified environment uses Python 3.12, MuJoCo 3.8.1, and Ruckig 0.19.4. The headless test suite validates the official limits and lit scene, FK Jacobians, wrist-anchor invariance, reachable/unreachable IK behavior, calibration conventions, wrist-pivot estimation, latest-state buffering, stale/reconnect behavior, exact command hold, trajectory convergence, and command limits.
 
 ## Connect the Quest over USB
 
@@ -71,6 +71,8 @@ Terminal 3—start the live MuJoCo consumer:
 python scripts\run_live_sim.py
 ```
 
+The viewer uses Trossen's official `scene_wxai_follow_target.xml`, including its lighting and ground plane. For the first acceptance check, press grip without moving and confirm there is no jump, move one axis slowly, then release grip and confirm the arm freezes. Re-gripping must re-anchor without a jump. Disconnecting or suspending the Quest stream must also freeze the command and require release followed by a new grip press.
+
 For a transport-only measurement with no simulation or robot output:
 
 ```powershell
@@ -82,10 +84,11 @@ If `adb devices -l` is empty, Windows does not currently see the Quest as an ADB
 ## Control and safety behavior
 
 - Pressing grip captures the current controller, simulated tool, and wrist-anchor poses.
-- Releasing grip holds the last safe command and permits hand repositioning.
+- Releasing grip clears trajectory velocity and acceleration, holds the last safe command exactly, and permits hand repositioning.
 - A stale stream or reconnect stops target advancement and requires grip release followed by a new press.
 - Position and rotation overshoot are absorbed at reach boundaries, so reversal responds immediately.
-- IK output always passes through joint-limit, low-pass, velocity, acceleration, jerk, and per-cycle step limits.
+- IK output always passes through Ruckig's documented online update loop with joint-position, velocity, acceleration, jerk, and effective per-cycle step limits.
+- The real-time loop measures each cycle from its actual start and never emits catch-up command bursts after a stall.
 - Prediction, raw Placo velocity/acceleration feedforward, and physical-arm output are off.
 - Every simulation run writes a configuration snapshot, machine-readable CSV telemetry, and summary under `runs/`.
 

@@ -4,6 +4,7 @@ project:
 
 model:
   xml_path: third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/wxai_follower.xml
+  simulation_scene_xml_path: third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/scene_wxai_follow_target.xml
   end_effector_site: ee_site
   wrist_anchor_site: wrist_anchor
   # Official Trossen staged posture, used only as the simulation/rest bias.
@@ -59,4 +60,3 @@ hardware:
 telemetry:
   output_dir: runs
   format: csv
-

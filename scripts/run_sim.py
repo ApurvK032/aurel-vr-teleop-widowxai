@@ -11,6 +11,7 @@ from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.math3d import quat_to_matrix
 from widowxai_quest_teleop.model import WidowXAIModel
+from widowxai_quest_teleop.safety import wait_for_cycle_period
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 
 
@@ -39,7 +40,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    kinematics = WidowXAIModel(config["model"]["xml_path"])
+    kinematics = WidowXAIModel(config["model"].get("simulation_scene_xml_path", config["model"]["xml_path"]))
     solver = DecoupledIK.from_config(kinematics, config)
     q_start = kinematics.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
     shaper = JointCommandShaper.from_config(q_start, kinematics.joint_limits, config)
@@ -64,7 +65,6 @@ def main() -> None:
         viewer = mujoco_viewer.launch_passive(kinematics.model, sim_data)
 
     started = time.perf_counter()
-    next_deadline = started
     tick = 0
     with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
         while time.perf_counter() - started < args.duration:
@@ -75,7 +75,7 @@ def main() -> None:
             target_pose, _ = kinematics.fk(target_q)
             if tick % ik_stride == 0:
                 ik_start = time.perf_counter_ns()
-                q_des, diagnostics = solver.solve(target_pose, q_feedback)
+                q_des, diagnostics = solver.solve(target_pose, q_des)
                 ik_end = time.perf_counter_ns()
             else:
                 ik_start = ik_end = 0
@@ -124,12 +124,7 @@ def main() -> None:
                     break
             tick += 1
             if args.realtime or args.viewer:
-                next_deadline += dt
-                remaining = next_deadline - time.perf_counter()
-                if remaining > 0.0:
-                    time.sleep(remaining)
-                elif remaining < -0.1:
-                    next_deadline = time.perf_counter()
+                wait_for_cycle_period(tick_started, dt)
         run_dir = telemetry.run_dir
     if viewer is not None:
         viewer.close()

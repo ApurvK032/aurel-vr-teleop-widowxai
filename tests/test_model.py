@@ -50,3 +50,10 @@ def test_joint_limits_are_from_official_model(model: WidowXAIModel) -> None:
     )
     np.testing.assert_allclose(model.joint_limits, expected, atol=1e-8)
 
+
+def test_official_simulation_scene_has_lighting_and_ground() -> None:
+    scene = WidowXAIModel(
+        "third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/scene_wxai_follow_target.xml"
+    )
+    assert scene.model.nlight > 0
+    assert scene.model.geom("floor").id >= 0
