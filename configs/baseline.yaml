@@ -18,8 +18,8 @@ quest:
   calibration: configs/calibrations/left_behind_full_pose_good_20260602.json
   translation_scale: 1.0
   rotation_scale: 1.0
-  position_reach_limit_m: 0.10
-  rotation_reach_limit_rad: 0.45
+  position_reach_limit_m: 0.06
+  rotation_reach_limit_rad: 0.25
 
 control:
   ik_rate_hz: 50
@@ -36,7 +36,7 @@ control:
   max_joint_velocity_rad_s: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5]
   max_joint_acceleration_rad_s2: [4.0, 4.0, 4.0, 8.0, 8.0, 8.0]
   max_joint_jerk_rad_s3: [240.0, 240.0, 240.0, 360.0, 360.0, 360.0]
-  max_joint_step_rad: [0.005, 0.005, 0.005, 0.010, 0.010, 0.010]
+  max_joint_step_rad: [0.010, 0.010, 0.010, 0.010, 0.010, 0.010]
 
 ik:
   backend: decoupled
@@ -51,6 +51,9 @@ ik:
   orientation_hold_error_rad: 2.20
   max_position_error_step_m: 0.025
   max_rotation_error_step_rad: 0.12
+  # Numerical IK may converge quickly; Ruckig remains the command-rate limiter.
+  solver_max_joint_step_rad: [0.05, 0.05, 0.05, 0.10, 0.10, 0.10]
+  joint_limit_margin_rad: 0.01
 
 hardware:
   enabled: false

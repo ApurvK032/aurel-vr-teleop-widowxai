@@ -33,6 +33,8 @@ TELEMETRY_COLUMNS = [
     "reanchor_generation",
     "raw_controller_position",
     "raw_controller_quaternion_wxyz",
+    "head_quaternion_wxyz",
+    "engage_head_yaw_rad",
     "mapped_target_position",
     "mapped_target_quaternion_wxyz",
     "wrist_target_position",

@@ -47,5 +47,5 @@ def test_unreachable_target_stays_finite_and_bounded(model: WidowXAIModel) -> No
     assert np.all(np.isfinite(q))
     assert np.all(q >= model.joint_limits[:, 0])
     assert np.all(q <= model.joint_limits[:, 1])
+    assert diagnostics.minimum_joint_limit_margin_rad >= 0.01 - 1e-12
     assert diagnostics.position_residual_m > 0.1
-

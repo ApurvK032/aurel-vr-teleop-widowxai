@@ -33,12 +33,14 @@ def test_transport_parses_webxr_xyzw_as_internal_wxyz() -> None:
                 "grip": 0.8,
                 "trigger": 0.2,
             },
+            "head": {"orientation_xyzw": [0, 0, 0, 1]},
             "reconnect_generation": 3,
         }
     )
     np.testing.assert_allclose(sample.controller_pose.quaternion_wxyz, [1, 0, 0, 0])
     assert sample.sequence == 7
     assert sample.reconnect_generation == 3
+    np.testing.assert_allclose(sample.head_quaternion_wxyz, [1, 0, 0, 0])
 
 
 def test_watchdog_requires_fresh_window_and_times_out() -> None:

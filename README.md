@@ -71,7 +71,7 @@ Terminal 3—start the live MuJoCo consumer:
 python scripts\run_live_sim.py
 ```
 
-The viewer uses Trossen's official `scene_wxai_follow_target.xml`, including its lighting and ground plane. For the first acceptance check, press grip without moving and confirm there is no jump, move one axis slowly, then release grip and confirm the arm freezes. Re-gripping must re-anchor without a jump. Disconnecting or suspending the Quest stream must also freeze the command and require release followed by a new grip press.
+The viewer uses Trossen's official `scene_wxai_follow_target.xml`, including its lighting and ground plane. The blue cube is the live controller-mapped target; the robot should follow it. For the first acceptance check, face the direction you want to count as robot-forward, press grip without moving, and confirm there is no jump. Move one axis slowly, then release grip and confirm the arm freezes. Re-gripping captures the current headset heading and re-anchors without a jump. Disconnecting or suspending the Quest stream must also freeze the command and require release followed by a new grip press.
 
 For a transport-only measurement with no simulation or robot output:
 
@@ -84,6 +84,7 @@ If `adb devices -l` is empty, Windows does not currently see the Quest as an ADB
 ## Control and safety behavior
 
 - Pressing grip captures the current controller, simulated tool, and wrist-anchor poses.
+- The headset yaw is captured on each grip edge using the article's `R_engage = R_calib R_y(-yaw)` mapping, so operator-forward remains robot-forward while normal head motion during the grab has no effect.
 - Releasing grip clears trajectory velocity and acceleration, holds the last safe command exactly, and permits hand repositioning.
 - A stale stream or reconnect stops target advancement and requires grip release followed by a new press.
 - Position and rotation overshoot are absorbed at reach boundaries, so reversal responds immediately.

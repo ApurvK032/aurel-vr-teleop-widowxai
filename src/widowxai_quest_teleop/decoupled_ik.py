@@ -49,6 +49,7 @@ class DecoupledIK:
         max_position_error_step_m: float = 0.025,
         max_rotation_error_step_rad: float = 0.12,
         max_joint_step_rad: np.ndarray | None = None,
+        joint_limit_margin_rad: float = 0.01,
         iterations_per_tick: int = 2,
     ) -> None:
         self.model = model
@@ -68,6 +69,7 @@ class DecoupledIK:
             if max_joint_step_rad is None
             else np.asarray(max_joint_step_rad, dtype=float).reshape(6).copy()
         )
+        self.joint_limit_margin_rad = max(0.0, float(joint_limit_margin_rad))
         self.iterations_per_tick = max(1, int(iterations_per_tick))
 
     @classmethod
@@ -88,9 +90,18 @@ class DecoupledIK:
             orientation_hold_error_rad=ik["orientation_hold_error_rad"],
             max_position_error_step_m=ik["max_position_error_step_m"],
             max_rotation_error_step_rad=ik["max_rotation_error_step_rad"],
-            max_joint_step_rad=np.asarray(control["max_joint_step_rad"], dtype=float),
+            max_joint_step_rad=np.asarray(
+                ik.get("solver_max_joint_step_rad", control["max_joint_step_rad"]),
+                dtype=float,
+            ),
+            joint_limit_margin_rad=ik.get("joint_limit_margin_rad", 0.01),
             iterations_per_tick=ik["iterations_per_tick"],
         )
+
+    def _clamp_joints(self, q_arm: np.ndarray) -> np.ndarray:
+        lower = self.model.joint_limits[:, 0] + self.joint_limit_margin_rad
+        upper = self.model.joint_limits[:, 1] - self.joint_limit_margin_rad
+        return np.clip(np.asarray(q_arm, dtype=float).reshape(6), lower, upper)
 
     @staticmethod
     def _adaptive_damping(base: float, extra: float, manipulability: float, threshold: float) -> float:
@@ -109,7 +120,7 @@ class DecoupledIK:
         *,
         iterations: int | None = None,
     ) -> tuple[np.ndarray, IKDiagnostics]:
-        q_initial = self.model.clamp_joints(q_seed)
+        q_initial = self._clamp_joints(q_seed)
         q = q_initial.copy()
         count = self.iterations_per_tick if iterations is None else max(1, int(iterations))
         target_rotation = quat_to_matrix(target.quaternion_wxyz)
@@ -149,7 +160,7 @@ class DecoupledIK:
                 arm_step = np.clip(arm_step, -self.max_joint_step_rad[:3], self.max_joint_step_rad[:3])
                 q[:3] += arm_step
                 unclamped = q.copy()
-                q = self.model.clamp_joints(q)
+                q = self._clamp_joints(q)
                 limit_clipped |= not np.allclose(q, unclamped)
 
                 current_ee, _ = self.model.fk(q)
@@ -174,7 +185,7 @@ class DecoupledIK:
                     )
                     q[3:6] += wrist_step
                     unclamped = q.copy()
-                    q = self.model.clamp_joints(q)
+                    q = self._clamp_joints(q)
                     limit_clipped |= not np.allclose(q, unclamped)
                 else:
                     status = "orientation_parked"
@@ -210,4 +221,3 @@ class DecoupledIK:
             status=status,
         )
         return q, diagnostics
-

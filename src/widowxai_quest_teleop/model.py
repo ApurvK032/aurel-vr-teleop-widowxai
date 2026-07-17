@@ -44,6 +44,8 @@ class WidowXAIModel:
         self.qpos_indices = np.array([self.model.jnt_qposadr[index] for index in self.joint_ids], dtype=int)
         self.dof_indices = np.array([self.model.jnt_dofadr[index] for index in self.joint_ids], dtype=int)
         self.joint_limits = self.model.jnt_range[self.joint_ids].copy()
+        target_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "target_cube")
+        self.target_mocap_id = -1 if target_body_id < 0 else int(self.model.body_mocapid[target_body_id])
 
     def _site_id(self, name: str) -> int:
         identifier = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
@@ -83,3 +85,7 @@ class WidowXAIModel:
         q = np.asarray(q_arm, dtype=float).reshape(6)
         return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
 
+    def set_target_pose(self, data: mujoco.MjData, target: Pose) -> None:
+        if self.target_mocap_id >= 0:
+            data.mocap_pos[self.target_mocap_id] = target.position
+            data.mocap_quat[self.target_mocap_id] = target.quaternion_wxyz

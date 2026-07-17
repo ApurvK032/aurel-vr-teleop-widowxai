@@ -82,6 +82,7 @@ def main() -> None:
 
             q_cmd = shaper.step(q_des, dt)
             sim_data.ctrl[:6] = q_cmd
+            kinematics.set_target_pose(sim_data, target_pose)
             for _ in range(physics_steps):
                 mujoco.mj_step(kinematics.model, sim_data)
             q_feedback = sim_data.qpos[kinematics.qpos_indices].copy()

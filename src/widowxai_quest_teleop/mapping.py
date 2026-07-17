@@ -37,11 +37,13 @@ class ClutchPoseMapper:
         with resolve_project_path(calibration_path).open("r", encoding="utf-8") as handle:
             calibration = json.load(handle)
         self.name = str(calibration["name"])
-        self.position_matrix = np.asarray(calibration["position_matrix"], dtype=float).reshape(3, 3)
+        self.calibrated_position_matrix = np.asarray(calibration["position_matrix"], dtype=float).reshape(3, 3)
         self.orientation_enabled = bool(calibration.get("orientation_enabled", True))
         rotation_key = "rotation_matrix" if "rotation_matrix" in calibration else "rotation_matrix_unconfirmed"
         signs_key = "task_rotation_signs" if "task_rotation_signs" in calibration else "task_rotation_signs_unconfirmed"
-        self.rotation_matrix = np.asarray(calibration[rotation_key], dtype=float).reshape(3, 3)
+        self.calibrated_rotation_matrix = np.asarray(calibration[rotation_key], dtype=float).reshape(3, 3)
+        self.position_matrix = self.calibrated_position_matrix.copy()
+        self.rotation_matrix = self.calibrated_rotation_matrix.copy()
         self.rotation_signs = np.asarray(calibration[signs_key], dtype=float).reshape(3)
         self.translation_scale = float(translation_scale)
         self.rotation_scale = float(rotation_scale)
@@ -52,12 +54,36 @@ class ClutchPoseMapper:
         self._previous_controller: Pose | None = None
         self._target: Pose | None = None
         self._pivot: np.ndarray | None = None
+        self.engage_head_yaw_rad: float | None = None
 
     @property
     def held_target(self) -> Pose | None:
         return self._target
 
-    def engage(self, controller: Pose, robot_target: Pose, wrist_pivot: np.ndarray) -> Pose:
+    @staticmethod
+    def _rotation_y(angle: float) -> np.ndarray:
+        cosine, sine = np.cos(angle), np.sin(angle)
+        return np.array([[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]])
+
+    def engage(
+        self,
+        controller: Pose,
+        robot_target: Pose,
+        wrist_pivot: np.ndarray,
+        *,
+        head_quaternion_wxyz: np.ndarray | None = None,
+    ) -> Pose:
+        if head_quaternion_wxyz is None:
+            self.engage_head_yaw_rad = None
+            heading_correction = np.eye(3)
+        else:
+            w, x, y, z = np.asarray(head_quaternion_wxyz, dtype=float).reshape(4)
+            self.engage_head_yaw_rad = float(
+                np.arctan2(2.0 * (w * y + x * z), 1.0 - 2.0 * (y * y + z * z))
+            )
+            heading_correction = self._rotation_y(-self.engage_head_yaw_rad)
+        self.position_matrix = self.calibrated_position_matrix @ heading_correction
+        self.rotation_matrix = self.calibrated_rotation_matrix @ heading_correction
         self._previous_controller = controller
         self._target = robot_target
         self._pivot = np.asarray(wrist_pivot, dtype=float).reshape(3).copy()
@@ -113,4 +139,3 @@ class ClutchPoseMapper:
         self._pivot = proposed_pivot
         self._previous_controller = controller
         return self._target
-

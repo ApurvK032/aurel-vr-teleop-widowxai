@@ -85,6 +85,7 @@ def main() -> None:
                         controller_pose=sample.controller_pose,
                         robot_pose=robot_pose,
                         wrist_pivot=wrist_pose.position,
+                        head_quaternion_wxyz=sample.head_quaternion_wxyz,
                     )
                 else:
                     freshness = watchdog.poll()
@@ -111,6 +112,8 @@ def main() -> None:
                     motion_active = False
                     q_cmd = shaper.q_command.copy()
                 sim_data.ctrl[:6] = q_cmd
+                if target_pose is not None:
+                    model.set_target_pose(sim_data, target_pose)
                 if last_sample is not None:
                     sim_data.ctrl[6] = 0.044 * (1.0 - np.clip(last_sample.trigger, 0.0, 1.0))
                 for _ in range(physics_steps):
@@ -136,6 +139,8 @@ def main() -> None:
                     reanchor_generation=mapper.reanchor_generation,
                     raw_controller_position="" if last_sample is None else last_sample.controller_pose.position,
                     raw_controller_quaternion_wxyz="" if last_sample is None else last_sample.controller_pose.quaternion_wxyz,
+                    head_quaternion_wxyz="" if last_sample is None else last_sample.head_quaternion_wxyz,
+                    engage_head_yaw_rad="" if mapper.engage_head_yaw_rad is None else mapper.engage_head_yaw_rad,
                     mapped_target_position="" if target_pose is None else target_pose.position,
                     mapped_target_quaternion_wxyz="" if target_pose is None else target_pose.quaternion_wxyz,
                     wrist_current_position=wrist_pose.position,

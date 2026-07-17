@@ -27,6 +27,7 @@ class ClutchController:
         controller_pose: Pose,
         robot_pose: Pose,
         wrist_pivot: np.ndarray,
+        head_quaternion_wxyz: np.ndarray | None = None,
     ) -> Pose | None:
         pressed = float(grip) >= self.grip_threshold
         if not stream_fresh:
@@ -43,7 +44,11 @@ class ClutchController:
             self._was_pressed = True
             return None
         if not self._was_pressed:
-            self.mapper.engage(controller_pose, robot_pose, wrist_pivot)
+            self.mapper.engage(
+                controller_pose,
+                robot_pose,
+                wrist_pivot,
+                head_quaternion_wxyz=head_quaternion_wxyz,
+            )
         self._was_pressed = True
         return self.mapper.update(controller_pose, robot_pose)
-
