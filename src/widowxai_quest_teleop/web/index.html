@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WidowXAI Quest Teleop</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">SIMULATION FIRST</p>
+    <h1>WidowXAI Quest Teleop</h1>
+    <p>This page streams the left Meta Quest controller to the Windows workstation. Grip is the clutch; trigger is reserved for the gripper.</p>
+    <div class="status"><span id="dot"></span><span id="status">Connecting to relay…</span></div>
+    <div class="actions">
+      <button id="enter" disabled>Enter VR</button>
+      <button id="exit" class="secondary" disabled>Exit VR</button>
+      <button id="calibrate" class="secondary">Calibrate wrist</button>
+    </div>
+    <dl>
+      <div><dt>Captured frames</dt><dd id="captured">0</dd></div>
+      <div><dt>Sent frames</dt><dd id="sent">0</dd></div>
+      <div><dt>Coalesced frames</dt><dd id="coalesced">0</dd></div>
+      <div><dt>Wrist pivot</dt><dd id="calibration">Not calibrated</dd></div>
+      <div><dt>USB page</dt><dd>http://localhost:8443/</dd></div>
+    </dl>
+    <p class="warning">This interface does not enable physical-arm output. Validate motion in MuJoCo first.</p>
+  </main>
+  <canvas id="xr-canvas"></canvas>
+  <script src="/client.js"></script>
+</body>
+</html>

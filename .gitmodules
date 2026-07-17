@@ -1,0 +1,6 @@
+[submodule "third_party/trossen_arm_mujoco"]
+	path = third_party/trossen_arm_mujoco
+	url = https://github.com/TrossenRobotics/trossen_arm_mujoco.git
+[submodule "third_party/trossen_arm_description"]
+	path = third_party/trossen_arm_description
+	url = https://github.com/TrossenRobotics/trossen_arm_description.git
