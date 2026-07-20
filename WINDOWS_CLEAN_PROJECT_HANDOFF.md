@@ -1,6 +1,17 @@
 # WidowXAI + Meta Quest 3 Teleoperation: Clean Project Handoff
 
-Updated: 2026-07-17
+Updated: 2026-07-20
+
+> **Current implementation note:** This file records the pre-build handoff and
+> remains useful for its calibration and hardware findings, but its proposed
+> architecture and baseline timing are historical. The user subsequently chose
+> to follow the article/reference control path directly. The implemented source
+> of truth is [README.md](README.md): 200 Hz single-step decoupled IK, the
+> reference per-joint delta caps, and direct MuJoCo `qpos` visualization. The
+> proposed 50/100 Hz Ruckig/actuator path is not part of the current project.
+> A gated 50%-gain physical demo is prepared, but the official Trossen driver
+> supports Ubuntu/macOS rather than native Windows, so live output fails closed
+> on this PC. See the README physical-demo section.
 
 ## Instructions For The Receiving Codex
 

@@ -38,11 +38,12 @@ def test_release_holds_until_a_new_grip_edge() -> None:
     np.testing.assert_allclose(reanchored.position, [0.3, 0.0, 0.2])
 
 
-def test_stale_or_reconnected_stream_requires_release_before_reengaging() -> None:
+def test_stale_stream_reanchors_at_current_pose_without_catch_up() -> None:
     clutch = make_clutch()
     assert update(clutch, 1.0, True) is not None
+    assert update(clutch, 1.0, True, 0.05) is not None
     assert update(clutch, 1.0, False) is None
     assert not clutch.mapper.engaged
-    assert update(clutch, 1.0, True) is None
-    assert update(clutch, 0.0, True) is None
-    assert update(clutch, 1.0, True) is not None
+    reanchored = update(clutch, 1.0, True, 1.0)
+    assert reanchored is not None
+    np.testing.assert_allclose(reanchored.position, [0.3, 0.0, 0.2])

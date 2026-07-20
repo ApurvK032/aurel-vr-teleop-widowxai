@@ -1,11 +1,10 @@
-import time
-
 import numpy as np
 
-from widowxai_quest_teleop.command_shaper import JointCommandShaper
+from widowxai_quest_teleop.pose_filter import pose_ema
 from widowxai_quest_teleop.sample_buffer import LatestValueMailbox
-from widowxai_quest_teleop.safety import FreshSequenceWatchdog, wait_for_cycle_period
+from widowxai_quest_teleop.safety import FreshSequenceWatchdog
 from widowxai_quest_teleop.transport import parse_pose_message
+from widowxai_quest_teleop.types import Pose
 from widowxai_quest_teleop.wrist_pivot import estimate_wrist_pivot_offset
 
 
@@ -62,81 +61,12 @@ def test_watchdog_requires_fresh_window_and_times_out() -> None:
     assert not watchdog.poll(second.pc_arrival_monotonic_ns + 20_000_000).fresh
 
 
-def test_command_shaper_respects_all_hard_bounds() -> None:
-    limits = np.tile(np.array([-1.0, 1.0]), (6, 1))
-    shaper = JointCommandShaper(
-        np.zeros(6),
-        limits,
-        lowpass_hz=8.0,
-        max_velocity=np.ones(6),
-        max_acceleration=np.full(6, 4.0),
-        max_jerk=np.full(6, 40.0),
-        max_step=np.full(6, 0.005),
-    )
-    previous = np.zeros(6)
-    previous_acceleration = np.zeros(6)
-    for target in [5.0] * 100 + [-5.0] * 200:
-        command = shaper.step(np.full(6, target), 0.01)
-        assert np.all(np.abs(command - previous) <= 0.005 + 1e-12)
-        assert np.all(command <= 1.0)
-        assert np.all(command >= -1.0)
-        assert np.all(np.abs(shaper.velocity) <= 0.5 + 1e-10)
-        assert np.all(np.abs(shaper.acceleration) <= 4.0 + 1e-10)
-        assert np.all(np.abs((shaper.acceleration - previous_acceleration) / 0.01) <= 40.0 + 1e-8)
-        previous = command
-        previous_acceleration = shaper.acceleration.copy()
-
-
-def test_command_shaper_converges_without_a_limit_cycle() -> None:
-    shaper = JointCommandShaper(
-        np.zeros(6),
-        np.tile(np.array([-1.0, 1.0]), (6, 1)),
-        lowpass_hz=8.0,
-        max_velocity=np.ones(6),
-        max_acceleration=np.full(6, 4.0),
-        max_jerk=np.full(6, 40.0),
-        max_step=np.full(6, 0.005),
-    )
-    tail = []
-    for index in range(1000):
-        command = shaper.step(np.full(6, 0.25), 0.01)
-        if index >= 900:
-            tail.append(command)
-    np.testing.assert_allclose(command, 0.25, atol=1e-9)
-    assert np.max(np.ptp(np.asarray(tail), axis=0)) < 1e-9
-
-
-def test_command_shaper_hold_clears_motion_and_stays_fixed() -> None:
-    shaper = JointCommandShaper(
-        np.zeros(6),
-        np.tile(np.array([-1.0, 1.0]), (6, 1)),
-        lowpass_hz=8.0,
-        max_velocity=np.ones(6),
-        max_acceleration=np.full(6, 4.0),
-        max_jerk=np.full(6, 40.0),
-        max_step=np.full(6, 0.005),
-    )
-    for _ in range(30):
-        shaper.step(np.full(6, 0.5), 0.01)
-    held = shaper.hold()
-    np.testing.assert_array_equal(shaper.velocity, np.zeros(6))
-    np.testing.assert_array_equal(shaper.acceleration, np.zeros(6))
-    for _ in range(100):
-        np.testing.assert_allclose(shaper.step(held, 0.01), held, atol=1e-12)
-
-
-def test_cycle_wait_never_attempts_to_catch_up() -> None:
-    sleeps: list[float] = []
-    now = [10.004]
-
-    def sleeper(duration: float) -> None:
-        sleeps.append(duration)
-        now[0] += duration
-
-    wait_for_cycle_period(10.0, 0.01, clock=lambda: now[0], sleeper=sleeper)
-    np.testing.assert_allclose(sleeps, [0.006], atol=1e-12)
-    wait_for_cycle_period(10.0, 0.01, clock=lambda: 10.015, sleeper=sleeper)
-    assert len(sleeps) == 1
+def test_pose_ema_matches_reference_position_and_quaternion_nlerp() -> None:
+    previous = Pose(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    current = Pose(np.ones(3), np.array([-0.8, -0.6, 0.0, 0.0]))
+    filtered = pose_ema(previous, current, 0.8)
+    np.testing.assert_allclose(filtered.position, np.full(3, 0.8))
+    np.testing.assert_allclose(filtered.quaternion_wxyz, [0.86824314, 0.49613894, 0.0, 0.0])
 
 
 def test_wrist_pivot_calibration_recovers_controller_frame_offset() -> None:

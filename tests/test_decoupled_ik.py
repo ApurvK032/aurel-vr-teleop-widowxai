@@ -47,5 +47,17 @@ def test_unreachable_target_stays_finite_and_bounded(model: WidowXAIModel) -> No
     assert np.all(np.isfinite(q))
     assert np.all(q >= model.joint_limits[:, 0])
     assert np.all(q <= model.joint_limits[:, 1])
-    assert diagnostics.minimum_joint_limit_margin_rad >= 0.01 - 1e-12
+    assert diagnostics.minimum_joint_limit_margin_rad >= -1e-12
     assert diagnostics.position_residual_m > 0.1
+
+
+def test_reference_per_tick_joint_delta_caps_are_applied_once(model: WidowXAIModel) -> None:
+    config = load_config()
+    solver = DecoupledIK.from_config(model, config)
+    q = np.array(config["model"]["simulation_start_q_rad"], dtype=float)
+    pose, _ = model.fk(q)
+    target = type(pose)(pose.position + np.array([1.0, 1.0, 1.0]), pose.quaternion_wxyz)
+    result, diagnostics = solver.solve(target, q)
+    caps = np.asarray(config["ik"]["max_dq_per_joint_rad"])
+    assert np.all(np.abs(result - q) <= caps + 1e-12)
+    assert diagnostics.iterations == 1

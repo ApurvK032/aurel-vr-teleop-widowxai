@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .math3d import clip_norm, orientation_error_world, quat_to_matrix
+from .math3d import orientation_error_world, quat_to_matrix
 from .model import WidowXAIModel
 from .types import Pose
 
@@ -30,7 +30,7 @@ class DecoupledIK:
 
     Joints 0-2 move the joint-3 wrist anchor. Joints 3-5 then track tool
     orientation. Each subproblem has independent manipulability-adaptive
-    damping and every step is bounded before it reaches a command backend.
+    damping. The combined step receives the reference kit's per-joint cap.
     """
 
     def __init__(
@@ -46,11 +46,7 @@ class DecoupledIK:
         lambda_rotation_extra: float = 0.40,
         rotation_manipulability_threshold: float = 0.50,
         orientation_hold_error_rad: float = 2.20,
-        max_position_error_step_m: float = 0.025,
-        max_rotation_error_step_rad: float = 0.12,
-        max_joint_step_rad: np.ndarray | None = None,
-        joint_limit_margin_rad: float = 0.01,
-        iterations_per_tick: int = 2,
+        max_dq_per_joint: np.ndarray | None = None,
     ) -> None:
         self.model = model
         self.rest_q = np.asarray(rest_q, dtype=float).reshape(6).copy()
@@ -62,20 +58,15 @@ class DecoupledIK:
         self.lambda_rotation_extra = float(lambda_rotation_extra)
         self.rotation_manipulability_threshold = float(rotation_manipulability_threshold)
         self.orientation_hold_error_rad = float(orientation_hold_error_rad)
-        self.max_position_error_step_m = float(max_position_error_step_m)
-        self.max_rotation_error_step_rad = float(max_rotation_error_step_rad)
-        self.max_joint_step_rad = (
+        self.max_dq_per_joint = (
             np.full(6, np.inf)
-            if max_joint_step_rad is None
-            else np.asarray(max_joint_step_rad, dtype=float).reshape(6).copy()
+            if max_dq_per_joint is None
+            else np.asarray(max_dq_per_joint, dtype=float).reshape(6).copy()
         )
-        self.joint_limit_margin_rad = max(0.0, float(joint_limit_margin_rad))
-        self.iterations_per_tick = max(1, int(iterations_per_tick))
 
     @classmethod
     def from_config(cls, model: WidowXAIModel, config: dict) -> "DecoupledIK":
         ik = config["ik"]
-        control = config["control"]
         rest_q = config["model"]["simulation_start_q_rad"]
         return cls(
             model,
@@ -88,20 +79,11 @@ class DecoupledIK:
             lambda_rotation_extra=ik["lambda_rotation_extra"],
             rotation_manipulability_threshold=ik["rotation_manipulability_threshold"],
             orientation_hold_error_rad=ik["orientation_hold_error_rad"],
-            max_position_error_step_m=ik["max_position_error_step_m"],
-            max_rotation_error_step_rad=ik["max_rotation_error_step_rad"],
-            max_joint_step_rad=np.asarray(
-                ik.get("solver_max_joint_step_rad", control["max_joint_step_rad"]),
-                dtype=float,
-            ),
-            joint_limit_margin_rad=ik.get("joint_limit_margin_rad", 0.01),
-            iterations_per_tick=ik["iterations_per_tick"],
+            max_dq_per_joint=np.asarray(ik["max_dq_per_joint_rad"], dtype=float),
         )
 
     def _clamp_joints(self, q_arm: np.ndarray) -> np.ndarray:
-        lower = self.model.joint_limits[:, 0] + self.joint_limit_margin_rad
-        upper = self.model.joint_limits[:, 1] - self.joint_limit_margin_rad
-        return np.clip(np.asarray(q_arm, dtype=float).reshape(6), lower, upper)
+        return self.model.clamp_joints(q_arm)
 
     @staticmethod
     def _adaptive_damping(base: float, extra: float, manipulability: float, threshold: float) -> float:
@@ -117,12 +99,8 @@ class DecoupledIK:
         self,
         target: Pose,
         q_seed: np.ndarray,
-        *,
-        iterations: int | None = None,
     ) -> tuple[np.ndarray, IKDiagnostics]:
         q_initial = self._clamp_joints(q_seed)
-        q = q_initial.copy()
-        count = self.iterations_per_tick if iterations is None else max(1, int(iterations))
         target_rotation = quat_to_matrix(target.quaternion_wxyz)
         limit_clipped = False
         wrist_parked = False
@@ -133,62 +111,56 @@ class DecoupledIK:
         rotation_damping = self.lambda_rotation
 
         try:
-            for _ in range(count):
-                current_ee, current_wrist = self.model.fk(q)
-                current_rotation = quat_to_matrix(current_ee.quaternion_wxyz)
-                ee_to_wrist_local = current_rotation.T @ (current_wrist.position - current_ee.position)
-                target_wrist = target.position + target_rotation @ ee_to_wrist_local
-                position_error = clip_norm(
-                    target_wrist - current_wrist.position,
-                    self.max_position_error_step_m,
-                )
+            current_ee, current_wrist = self.model.fk(q_initial)
+            current_rotation = quat_to_matrix(current_ee.quaternion_wxyz)
+            ee_to_wrist_local = current_rotation.T @ (current_wrist.position - current_ee.position)
+            target_wrist = target.position + target_rotation @ ee_to_wrist_local
+            position_error = target_wrist - current_wrist.position
 
-                jacobian_position, _ = self.model.jacobian("wrist")
-                arm_jacobian = jacobian_position[:, :3]
-                position_manipulability = abs(float(np.linalg.det(arm_jacobian)))
-                position_damping = self._adaptive_damping(
-                    self.lambda_position,
-                    self.lambda_position_extra,
-                    position_manipulability,
-                    self.position_manipulability_threshold,
-                )
-                mu2 = self.rest_bias * self.rest_bias
-                normal = arm_jacobian.T @ arm_jacobian
-                normal += (position_damping * position_damping + mu2) * np.eye(3)
-                rhs = arm_jacobian.T @ position_error + mu2 * (self.rest_q[:3] - q[:3])
-                arm_step = np.linalg.solve(normal, rhs)
-                arm_step = np.clip(arm_step, -self.max_joint_step_rad[:3], self.max_joint_step_rad[:3])
-                q[:3] += arm_step
-                unclamped = q.copy()
-                q = self._clamp_joints(q)
-                limit_clipped |= not np.allclose(q, unclamped)
+            jacobian_position, _ = self.model.jacobian("wrist")
+            arm_jacobian = jacobian_position[:, :3]
+            position_manipulability = abs(float(np.linalg.det(arm_jacobian)))
+            position_damping = self._adaptive_damping(
+                self.lambda_position,
+                self.lambda_position_extra,
+                position_manipulability,
+                self.position_manipulability_threshold,
+            )
+            mu2 = self.rest_bias * self.rest_bias
+            normal = arm_jacobian.T @ arm_jacobian
+            normal += (position_damping * position_damping + mu2) * np.eye(3)
+            rhs = arm_jacobian.T @ position_error + mu2 * (self.rest_q[:3] - q_initial[:3])
+            q_after_arm = q_initial.copy()
+            q_after_arm[:3] += np.linalg.solve(normal, rhs)
 
-                current_ee, _ = self.model.fk(q)
-                rotation_error = orientation_error_world(target.quaternion_wxyz, current_ee.quaternion_wxyz)
-                wrist_parked = float(np.linalg.norm(rotation_error)) > self.orientation_hold_error_rad
-                _, jacobian_rotation = self.model.jacobian("ee")
-                wrist_jacobian = jacobian_rotation[:, 3:6]
-                rotation_manipulability = abs(float(np.linalg.det(wrist_jacobian)))
-                rotation_damping = self._adaptive_damping(
-                    self.lambda_rotation,
-                    self.lambda_rotation_extra,
-                    rotation_manipulability,
-                    self.rotation_manipulability_threshold,
-                )
-                if not wrist_parked:
-                    rotation_error = clip_norm(rotation_error, self.max_rotation_error_step_rad)
-                    wrist_step = self._dls(wrist_jacobian, rotation_error, rotation_damping)
-                    wrist_step = np.clip(
-                        wrist_step,
-                        -self.max_joint_step_rad[3:6],
-                        self.max_joint_step_rad[3:6],
-                    )
-                    q[3:6] += wrist_step
-                    unclamped = q.copy()
-                    q = self._clamp_joints(q)
-                    limit_clipped |= not np.allclose(q, unclamped)
-                else:
-                    status = "orientation_parked"
+            current_ee, _ = self.model.fk(q_after_arm)
+            rotation_error = orientation_error_world(target.quaternion_wxyz, current_ee.quaternion_wxyz)
+            wrist_parked = float(np.linalg.norm(rotation_error)) > self.orientation_hold_error_rad
+            _, jacobian_rotation = self.model.jacobian("ee")
+            wrist_jacobian = jacobian_rotation[:, 3:6]
+            rotation_manipulability = abs(float(np.linalg.det(wrist_jacobian)))
+            rotation_damping = self._adaptive_damping(
+                self.lambda_rotation,
+                self.lambda_rotation_extra,
+                rotation_manipulability,
+                self.rotation_manipulability_threshold,
+            )
+            wrist_step = np.zeros(3)
+            if wrist_parked:
+                status = "orientation_parked"
+            else:
+                wrist_step = self._dls(wrist_jacobian, rotation_error, rotation_damping)
+
+            q_unclamped = q_after_arm.copy()
+            q_unclamped[3:6] += wrist_step
+            q_reachable = self._clamp_joints(q_unclamped)
+            limit_clipped = not np.allclose(q_reachable, q_unclamped)
+            dq = np.clip(
+                q_reachable - q_initial,
+                -self.max_dq_per_joint,
+                self.max_dq_per_joint,
+            )
+            q = self._clamp_joints(q_initial + dq)
         except (np.linalg.LinAlgError, FloatingPointError, ValueError):
             q = q_initial.copy()
             status = "numerical_failure"
@@ -214,7 +186,7 @@ class DecoupledIK:
             position_damping=position_damping,
             rotation_damping=rotation_damping,
             step_norm_rad=float(np.linalg.norm(q - q_initial)),
-            iterations=count,
+            iterations=1,
             minimum_joint_limit_margin_rad=float(np.min(margins)),
             joint_limit_clipped=limit_clipped,
             wrist_parked=wrist_parked,

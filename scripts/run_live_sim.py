@@ -7,12 +7,12 @@ import mujoco
 import numpy as np
 
 from widowxai_quest_teleop.clutch import ClutchController
-from widowxai_quest_teleop.command_shaper import JointCommandShaper
 from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.safety import FreshSequenceWatchdog, wait_for_cycle_period
+from widowxai_quest_teleop.pose_filter import pose_ema
+from widowxai_quest_teleop.safety import FreshSequenceWatchdog
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 from widowxai_quest_teleop.transport import QuestReceiver
 
@@ -27,10 +27,9 @@ def main() -> None:
 
     config = load_config(args.config)
     quest_config = config["quest"]
-    model = WidowXAIModel(config["model"].get("simulation_scene_xml_path", config["model"]["xml_path"]))
+    model = WidowXAIModel(config["model"]["xml_path"])
     solver = DecoupledIK.from_config(model, config)
     q_start = model.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
-    shaper = JointCommandShaper.from_config(q_start, model.joint_limits, config)
     mapper = ClutchPoseMapper(
         quest_config["calibration"],
         translation_scale=quest_config["translation_scale"],
@@ -46,78 +45,68 @@ def main() -> None:
     receiver.start()
 
     sim_data = mujoco.MjData(model.model)
-    sim_data.qpos[model.qpos_indices] = q_start
-    sim_data.ctrl[:6] = q_start
-    sim_data.ctrl[6] = 0.044
-    mujoco.mj_forward(model.model, sim_data)
+    gripper_q = 0.044
+    model.set_viewer_qpos(sim_data, q_start, gripper_q)
     viewer = None
     if not args.headless:
         from mujoco import viewer as mujoco_viewer
 
         viewer = mujoco_viewer.launch_passive(model.model, sim_data)
 
-    command_hz = float(config["control"]["command_rate_hz"])
-    ik_hz = float(config["control"]["ik_rate_hz"])
-    dt = 1.0 / command_hz
-    ik_stride = max(1, round(command_hz / ik_hz))
-    physics_steps = max(1, round(dt / model.model.opt.timestep))
-    q_des = q_start.copy()
+    loop_hz = float(config["control"]["loop_rate_hz"])
+    dt = 1.0 / loop_hz
+    filter_alpha = float(config["control"]["pose_filter_alpha"])
+    q_command = q_start.copy()
     target_pose = None
     last_sample = None
+    filtered_controller = None
     diagnostics = None
-    motion_active = False
-    tick = 0
     started = time.perf_counter()
+    next_tick = started
 
     try:
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
             while args.duration <= 0.0 or time.perf_counter() - started < args.duration:
                 tick_started = time.perf_counter()
-                q_feedback = sim_data.qpos[model.qpos_indices].copy()
-                robot_pose, wrist_pose = model.fk(q_feedback)
                 sample, _ = receiver.mailbox.take_latest()
                 if sample is not None:
                     last_sample = sample
                     freshness = watchdog.observe(sample)
-                    target_pose = clutch.update(
-                        grip=sample.grip,
-                        stream_fresh=freshness.fresh,
-                        controller_pose=sample.controller_pose,
-                        robot_pose=robot_pose,
-                        wrist_pivot=wrist_pose.position,
-                        head_quaternion_wxyz=sample.head_quaternion_wxyz,
-                    )
                 else:
                     freshness = watchdog.poll()
-                    if not freshness.fresh and mapper.engaged:
-                        clutch.force_reanchor()
-                        target_pose = None
+
+                robot_pose, wrist_pose = model.fk(q_command)
+                if last_sample is not None:
+                    filtered_controller = pose_ema(
+                        filtered_controller,
+                        last_sample.controller_pose,
+                        filter_alpha,
+                    )
+                    target_pose = clutch.update(
+                        grip=last_sample.grip,
+                        stream_fresh=freshness.fresh,
+                        controller_pose=filtered_controller,
+                        robot_pose=robot_pose,
+                        wrist_pivot=wrist_pose.position,
+                        head_quaternion_wxyz=last_sample.head_quaternion_wxyz,
+                    )
+                else:
+                    target_pose = None
 
                 target_active = target_pose is not None and freshness.fresh and mapper.engaged
-                just_engaged = target_active and not motion_active
                 if target_active:
-                    motion_active = True
-                    if not just_engaged and tick % ik_stride == 0:
-                        ik_start = time.perf_counter_ns()
-                        q_des, diagnostics = solver.solve(target_pose, q_des)
-                        ik_end = time.perf_counter_ns()
-                    else:
-                        ik_start = ik_end = 0
-                    q_cmd = shaper.step(q_des, dt)
+                    ik_start = time.perf_counter_ns()
+                    q_command, diagnostics = solver.solve(target_pose, q_command)
+                    ik_end = time.perf_counter_ns()
+                    gripper_q = 0.044 * (1.0 - np.clip(last_sample.trigger, 0.0, 1.0))
                 else:
                     ik_start = ik_end = 0
-                    if motion_active:
-                        q_des = shaper.hold()
-                        diagnostics = None
-                    motion_active = False
-                    q_cmd = shaper.q_command.copy()
-                sim_data.ctrl[:6] = q_cmd
-                if target_pose is not None:
-                    model.set_target_pose(sim_data, target_pose)
-                if last_sample is not None:
-                    sim_data.ctrl[6] = 0.044 * (1.0 - np.clip(last_sample.trigger, 0.0, 1.0))
-                for _ in range(physics_steps):
-                    mujoco.mj_step(model.model, sim_data)
+                    diagnostics = None
+                if not mapper.engaged:
+                    filtered_controller = None
+                model.set_viewer_qpos(sim_data, q_command, gripper_q)
+                q_feedback = sim_data.qpos[model.qpos_indices].copy()
+                _, wrist_pose = model.fk(q_feedback)
 
                 telemetry.log(
                     pc_epoch_ns=time.time_ns(),
@@ -144,8 +133,8 @@ def main() -> None:
                     mapped_target_position="" if target_pose is None else target_pose.position,
                     mapped_target_quaternion_wxyz="" if target_pose is None else target_pose.quaternion_wxyz,
                     wrist_current_position=wrist_pose.position,
-                    q_des=q_des,
-                    q_cmd=q_cmd,
+                    q_des=q_command,
+                    q_cmd=q_command,
                     q_feedback=q_feedback,
                     position_residual_m="" if diagnostics is None else diagnostics.position_residual_m,
                     orientation_residual_rad="" if diagnostics is None else diagnostics.orientation_residual_rad,
@@ -156,17 +145,21 @@ def main() -> None:
                     ik_step_norm_rad="" if diagnostics is None else diagnostics.step_norm_rad,
                     minimum_joint_limit_margin_rad="" if diagnostics is None else diagnostics.minimum_joint_limit_margin_rad,
                     ik_status="" if diagnostics is None else diagnostics.status,
-                    limiter_flags=shaper.last_limiter_flags,
+                    limiter_flags="",
                 )
                 if viewer is not None:
                     viewer.sync()
                     if not viewer.is_running():
                         break
-                tick += 1
-                wait_for_cycle_period(tick_started, dt)
+                next_tick += dt
+                sleep_for = next_tick - time.perf_counter()
+                if sleep_for > 0.0:
+                    time.sleep(sleep_for)
+                else:
+                    next_tick = time.perf_counter()
             print(f"telemetry: {telemetry.run_dir}")
     except KeyboardInterrupt:
-        print("stopped; simulation held its last safe command")
+        print("stopped; viewer held its last commanded pose")
     finally:
         receiver.stop()
         if viewer is not None:

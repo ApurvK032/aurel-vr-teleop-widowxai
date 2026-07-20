@@ -6,12 +6,10 @@ import time
 import mujoco
 import numpy as np
 
-from widowxai_quest_teleop.command_shaper import JointCommandShaper
 from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.math3d import quat_to_matrix
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.safety import wait_for_cycle_period
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 
 
@@ -40,23 +38,16 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    kinematics = WidowXAIModel(config["model"].get("simulation_scene_xml_path", config["model"]["xml_path"]))
+    kinematics = WidowXAIModel(config["model"]["xml_path"])
     solver = DecoupledIK.from_config(kinematics, config)
     q_start = kinematics.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
-    shaper = JointCommandShaper.from_config(q_start, kinematics.joint_limits, config)
 
     sim_data = mujoco.MjData(kinematics.model)
-    sim_data.qpos[kinematics.qpos_indices] = q_start
-    sim_data.ctrl[:6] = q_start
-    sim_data.ctrl[6] = 0.044
-    mujoco.mj_forward(kinematics.model, sim_data)
+    kinematics.set_viewer_qpos(sim_data, q_start, 0.044)
 
-    command_hz = float(config["control"]["command_rate_hz"])
-    ik_hz = float(config["control"]["ik_rate_hz"])
-    dt = 1.0 / command_hz
-    ik_stride = max(1, round(command_hz / ik_hz))
-    physics_steps = max(1, round(dt / kinematics.model.opt.timestep))
-    q_des = q_start.copy()
+    loop_hz = float(config["control"]["loop_rate_hz"])
+    dt = 1.0 / loop_hz
+    q_command = q_start.copy()
     diagnostics = None
     viewer = None
     if args.viewer:
@@ -65,26 +56,18 @@ def main() -> None:
         viewer = mujoco_viewer.launch_passive(kinematics.model, sim_data)
 
     started = time.perf_counter()
+    next_tick = started
     tick = 0
     with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
         while time.perf_counter() - started < args.duration:
             tick_started = time.perf_counter()
             elapsed = tick * dt
-            q_feedback = sim_data.qpos[kinematics.qpos_indices].copy()
             target_q = kinematics.clamp_joints(reference_q(q_start, elapsed))
             target_pose, _ = kinematics.fk(target_q)
-            if tick % ik_stride == 0:
-                ik_start = time.perf_counter_ns()
-                q_des, diagnostics = solver.solve(target_pose, q_des)
-                ik_end = time.perf_counter_ns()
-            else:
-                ik_start = ik_end = 0
-
-            q_cmd = shaper.step(q_des, dt)
-            sim_data.ctrl[:6] = q_cmd
-            kinematics.set_target_pose(sim_data, target_pose)
-            for _ in range(physics_steps):
-                mujoco.mj_step(kinematics.model, sim_data)
+            ik_start = time.perf_counter_ns()
+            q_command, diagnostics = solver.solve(target_pose, q_command)
+            ik_end = time.perf_counter_ns()
+            kinematics.set_viewer_qpos(sim_data, q_command, 0.044)
             q_feedback = sim_data.qpos[kinematics.qpos_indices].copy()
             current_ee, current_wrist = kinematics.fk(q_feedback)
             target_rotation = quat_to_matrix(target_pose.quaternion_wxyz)
@@ -105,8 +88,8 @@ def main() -> None:
                 mapped_target_quaternion_wxyz=target_pose.quaternion_wxyz,
                 wrist_target_position=wrist_target,
                 wrist_current_position=current_wrist.position,
-                q_des=q_des,
-                q_cmd=q_cmd,
+                q_des=q_command,
+                q_cmd=q_command,
                 q_feedback=q_feedback,
                 position_residual_m="" if diagnostics is None else diagnostics.position_residual_m,
                 orientation_residual_rad="" if diagnostics is None else diagnostics.orientation_residual_rad,
@@ -117,7 +100,7 @@ def main() -> None:
                 ik_step_norm_rad="" if diagnostics is None else diagnostics.step_norm_rad,
                 minimum_joint_limit_margin_rad="" if diagnostics is None else diagnostics.minimum_joint_limit_margin_rad,
                 ik_status="" if diagnostics is None else diagnostics.status,
-                limiter_flags=shaper.last_limiter_flags,
+                limiter_flags="",
             )
             if viewer is not None:
                 viewer.sync()
@@ -125,7 +108,12 @@ def main() -> None:
                     break
             tick += 1
             if args.realtime or args.viewer:
-                wait_for_cycle_period(tick_started, dt)
+                next_tick += dt
+                sleep_for = next_tick - time.perf_counter()
+                if sleep_for > 0.0:
+                    time.sleep(sleep_for)
+                else:
+                    next_tick = time.perf_counter()
         run_dir = telemetry.run_dir
     if viewer is not None:
         viewer.close()

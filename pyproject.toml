@@ -14,13 +14,13 @@ dependencies = [
   "mujoco==3.8.1",
   "numpy>=2.2,<3",
   "pyyaml>=6.0,<7",
-  "ruckig==0.19.4",
   "uvicorn[standard]>=0.35,<1",
   "websockets>=15,<17",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.4,<10"]
+hardware = ["trossen-arm==1.11.0; platform_system != 'Windows'"]
 placo = ["placo>=0.9.23,<1"]
 
 [project.scripts]

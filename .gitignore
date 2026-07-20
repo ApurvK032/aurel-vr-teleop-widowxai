@@ -9,6 +9,10 @@ dist/
 *.egg-info/
 runs/
 certs/
+Previous versions/
+.env
+.env.*
+*.pem
+*.key
 .idea/
 .vscode/
-

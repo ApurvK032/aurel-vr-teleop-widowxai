@@ -16,7 +16,7 @@ JOINT3_ORIGIN_IN_LINK3 = np.array([0.245, 0.0, 0.06], dtype=float)
 
 
 class WidowXAIModel:
-    """Official WidowXAI MJCF decorated with an upstream wrist-anchor site."""
+    """Official WidowXAI MJCF decorated for the reference teleop viewer."""
 
     def __init__(self, xml_path: str | Path = DEFAULT_MODEL_XML) -> None:
         self.xml_path = resolve_project_path(xml_path)
@@ -35,6 +35,23 @@ class WidowXAIModel:
             size=[0.008, 0.0, 0.0],
             rgba=[1.0, 0.45, 0.0, 1.0],
         )
+        spec.visual.headlight.diffuse = [0.6, 0.6, 0.6]
+        spec.visual.headlight.ambient = [0.3, 0.3, 0.3]
+        spec.visual.headlight.specular = [0.0, 0.0, 0.0]
+        spec.worldbody.add_light(
+            name="viewer_light",
+            pos=[0.0, 0.0, 1.5],
+            dir=[0.0, 0.0, -1.0],
+            type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
+        )
+        spec.worldbody.add_geom(
+            name="floor",
+            type=mujoco.mjtGeom.mjGEOM_PLANE,
+            size=[0.0, 0.0, 0.05],
+            rgba=[0.16, 0.20, 0.24, 1.0],
+            contype=0,
+            conaffinity=0,
+        )
         self.model = spec.compile()
         self.data = mujoco.MjData(self.model)
 
@@ -44,8 +61,13 @@ class WidowXAIModel:
         self.qpos_indices = np.array([self.model.jnt_qposadr[index] for index in self.joint_ids], dtype=int)
         self.dof_indices = np.array([self.model.jnt_dofadr[index] for index in self.joint_ids], dtype=int)
         self.joint_limits = self.model.jnt_range[self.joint_ids].copy()
-        target_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "target_cube")
-        self.target_mocap_id = -1 if target_body_id < 0 else int(self.model.body_mocapid[target_body_id])
+        self.gripper_qpos_indices = np.array(
+            [
+                self.model.jnt_qposadr[self._joint_id("right_carriage_joint")],
+                self.model.jnt_qposadr[self._joint_id("left_carriage_joint")],
+            ],
+            dtype=int,
+        )
 
     def _site_id(self, name: str) -> int:
         identifier = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
@@ -85,7 +107,8 @@ class WidowXAIModel:
         q = np.asarray(q_arm, dtype=float).reshape(6)
         return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
 
-    def set_target_pose(self, data: mujoco.MjData, target: Pose) -> None:
-        if self.target_mocap_id >= 0:
-            data.mocap_pos[self.target_mocap_id] = target.position
-            data.mocap_quat[self.target_mocap_id] = target.quaternion_wxyz
+    def set_viewer_qpos(self, data: mujoco.MjData, q_arm: np.ndarray, gripper_q: float) -> None:
+        """Apply commands exactly as the reference kit's passive viewer does."""
+        data.qpos[self.qpos_indices] = np.asarray(q_arm, dtype=float).reshape(6)
+        data.qpos[self.gripper_qpos_indices] = float(gripper_q)
+        mujoco.mj_forward(self.model, data)

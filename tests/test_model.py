@@ -2,7 +2,6 @@ import numpy as np
 import mujoco
 
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.types import Pose
 
 
 def test_wrist_anchor_is_invariant_to_wrist_joints(model: WidowXAIModel) -> None:
@@ -53,13 +52,16 @@ def test_joint_limits_are_from_official_model(model: WidowXAIModel) -> None:
     np.testing.assert_allclose(model.joint_limits, expected, atol=1e-8)
 
 
-def test_official_simulation_scene_has_lighting_and_ground() -> None:
-    scene = WidowXAIModel(
-        "third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/scene_wxai_follow_target.xml"
-    )
+def test_reference_style_viewer_has_lighting_ground_and_no_target_object() -> None:
+    scene = WidowXAIModel()
     assert scene.model.nlight > 0
     assert scene.model.geom("floor").id >= 0
-    target = Pose(np.array([0.4, -0.1, 0.3]), np.array([1.0, 0.0, 0.0, 0.0]))
-    data = mujoco.MjData(scene.model)
-    scene.set_target_pose(data, target)
-    np.testing.assert_allclose(data.mocap_pos[scene.target_mocap_id], target.position)
+    assert mujoco.mj_name2id(scene.model, mujoco.mjtObj.mjOBJ_BODY, "target_cube") == -1
+
+
+def test_viewer_qpos_is_applied_directly(model: WidowXAIModel) -> None:
+    data = mujoco.MjData(model.model)
+    q = np.array([0.2, 1.0, 0.7, 0.3, -0.2, 0.4])
+    model.set_viewer_qpos(data, q, 0.031)
+    np.testing.assert_array_equal(data.qpos[model.qpos_indices], q)
+    np.testing.assert_array_equal(data.qpos[model.gripper_qpos_indices], [0.031, 0.031])

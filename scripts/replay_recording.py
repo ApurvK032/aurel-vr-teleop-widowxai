@@ -10,11 +10,11 @@ import mujoco
 import numpy as np
 
 from widowxai_quest_teleop.clutch import ClutchController
-from widowxai_quest_teleop.command_shaper import JointCommandShaper
 from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
+from widowxai_quest_teleop.pose_filter import pose_ema
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 from widowxai_quest_teleop.types import Pose
 
@@ -35,7 +35,6 @@ def main() -> None:
     model = WidowXAIModel(config["model"]["xml_path"])
     solver = DecoupledIK.from_config(model, config)
     q_start = model.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
-    shaper = JointCommandShaper.from_config(q_start, model.joint_limits, config)
     mapper = ClutchPoseMapper(
         quest["calibration"],
         translation_scale=quest["translation_scale"],
@@ -45,11 +44,12 @@ def main() -> None:
     )
     clutch = ClutchController(mapper)
     sim_data = mujoco.MjData(model.model)
-    sim_data.qpos[model.qpos_indices] = q_start
-    sim_data.ctrl[:6] = q_start
-    sim_data.ctrl[6] = 0.044
-    mujoco.mj_forward(model.model, sim_data)
-    q_des = q_start.copy()
+    gripper_q = 0.044
+    model.set_viewer_qpos(sim_data, q_start, gripper_q)
+    q_command = q_start.copy()
+    filtered_controller = None
+    loop_hz = float(config["control"]["loop_rate_hz"])
+    filter_alpha = float(config["control"]["pose_filter_alpha"])
     previous_sequence = None
     previous_capture_ms = None
     replayed = 0
@@ -72,23 +72,31 @@ def main() -> None:
                 decode_array(row["raw_controller_position"]),
                 decode_array(row["raw_controller_quaternion_wxyz"]),
             )
-            q_feedback = sim_data.qpos[model.qpos_indices].copy()
-            robot_pose, wrist_pose = model.fk(q_feedback)
-            target = clutch.update(
-                grip=float(row.get("quest_grip") or 0.0),
-                stream_fresh=True,
-                controller_pose=controller,
-                robot_pose=robot_pose,
-                wrist_pivot=wrist_pose.position,
+            head_quaternion = (
+                decode_array(row["head_quaternion_wxyz"])
+                if row.get("head_quaternion_wxyz")
+                else None
             )
             diagnostics = None
-            if target is not None:
-                q_des, diagnostics = solver.solve(target, q_feedback)
-            q_cmd = shaper.step(q_des, float(dt))
-            sim_data.ctrl[:6] = q_cmd
-            physics_steps = max(1, round(float(dt) / model.model.opt.timestep))
-            for _ in range(physics_steps):
-                mujoco.mj_step(model.model, sim_data)
+            target = None
+            for _ in range(max(1, round(float(dt) * loop_hz))):
+                filtered_controller = pose_ema(filtered_controller, controller, filter_alpha)
+                robot_pose, wrist_pose = model.fk(q_command)
+                target = clutch.update(
+                    grip=float(row.get("quest_grip") or 0.0),
+                    stream_fresh=row.get("stream_fresh", "True").lower() == "true",
+                    controller_pose=filtered_controller,
+                    robot_pose=robot_pose,
+                    wrist_pivot=wrist_pose.position,
+                    head_quaternion_wxyz=head_quaternion,
+                )
+                if target is not None:
+                    q_command, diagnostics = solver.solve(target, q_command)
+            if mapper.engaged:
+                gripper_q = 0.044 * (1.0 - np.clip(float(row.get("quest_trigger") or 0.0), 0.0, 1.0))
+            else:
+                filtered_controller = None
+            model.set_viewer_qpos(sim_data, q_command, gripper_q)
             telemetry.log(
                 pc_epoch_ns=time.time_ns(),
                 pc_monotonic_ns=time.perf_counter_ns(),
@@ -103,8 +111,8 @@ def main() -> None:
                 raw_controller_quaternion_wxyz=controller.quaternion_wxyz,
                 mapped_target_position="" if target is None else target.position,
                 mapped_target_quaternion_wxyz="" if target is None else target.quaternion_wxyz,
-                q_des=q_des,
-                q_cmd=q_cmd,
+                q_des=q_command,
+                q_cmd=q_command,
                 q_feedback=sim_data.qpos[model.qpos_indices].copy(),
                 position_residual_m="" if diagnostics is None else diagnostics.position_residual_m,
                 orientation_residual_rad="" if diagnostics is None else diagnostics.orientation_residual_rad,
@@ -115,7 +123,7 @@ def main() -> None:
                 ik_step_norm_rad="" if diagnostics is None else diagnostics.step_norm_rad,
                 minimum_joint_limit_margin_rad="" if diagnostics is None else diagnostics.minimum_joint_limit_margin_rad,
                 ik_status="" if diagnostics is None else diagnostics.status,
-                limiter_flags=shaper.last_limiter_flags,
+                limiter_flags="",
             )
             replayed += 1
         run_dir = telemetry.run_dir
@@ -125,4 +133,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
