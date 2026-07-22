@@ -165,6 +165,26 @@ Driver 1.8.6 predates the discovery API, so its preflight opens the version-matc
 
 The explicit `--live --confirm-live LIVE-WIDOWXAI-<IP>` command-line gate authorizes startup; there is no second interactive `ARM READY` prompt. Before motion, the launcher rejects malformed safety settings, requires fresh Quest tracking with grip released, enforces the exact `1.8.6` driver and firmware `1.8.x`, validates finite feedback and physical limits, and screens the complete startup path with the pinned MuJoCo model. The arm reaches home with the gripper untouched, then a gripper-enabled profile reproduces the previous XRoboToolkit strategy with one separate blocking two-second gripper-open command. Keep the left grip released during startup; after home is reached, holding left grip engages relative teleoperation and releasing it holds the latest safe command. Stale tracking holds and re-anchors from measured feedback. On any exit after motion begins, the launcher collision-checks the path and uses a blocking two-second arm move to the all-zero rest pose; a gripper-enabled profile then closes the gripper separately. If that transition cannot be validated or completed, it falls back to a measured-position hold and prints an emergency warning.
 
+### Quest-free six-axis arm diagnostic
+
+Use the deterministic diagnostic to separate Quest/teleoperation command jitter from the arm/driver path. It precomputes small `12 mm` translations and `3 degree` rotations for left/right, up/down, forward/backward, screw, nod-yes, and nod-no. Each leg uses a minimum-snap joint trajectory at the same `90 Hz` command cadence and `15 ms` driver horizon as the calibrated teleoperation profile. The complete plan is rejected before diagnostic motion if IK does not converge, MuJoCo predicts a collision, or any configured step, velocity, acceleration, jerk, or joint-margin limit is exceeded. It leaves the physical gripper untouched, moves rest-to-home on startup, and returns home-to-rest on every normal or safety-stop exit.
+
+Validate the plan without physical output:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/run_six_axis_diagnostic.py
+```
+
+After clearing the workspace and preparing to cut controller power, run the physical sequence:
+
+```bash
+env -u PYTHONPATH .venv-arm18/bin/python scripts/run_six_axis_diagnostic.py \
+  --live \
+  --confirm-live LIVE-WIDOWXAI-192.168.1.2
+```
+
+No Quest, WebXR page, relay, or localhost server is required. A smooth run points toward the live Quest/filter/online-IK command stream as the vibration source. Vibration in this test narrows the source to the deterministic command/driver/arm side, but by itself does not prove a mechanical fault. Each run records command timing and sampled tracking error under `runs/`.
+
 Trossen requires driver and controller firmware major/minor versions to match. Do not automatically clear controller errors or flash firmware for a demo; diagnose any reported error using the [official troubleshooting guide](https://docs.trossenrobotics.com/trossen_arm/main/troubleshooting.html).
 
 ## Layout
@@ -180,6 +200,7 @@ scripts/run_xr_benchmark.py     transport-only timing check
 scripts/replay_recording.py     deterministic recorded-input replay
 scripts/preflight_hardware.py   no-motion version/state check
 scripts/run_hardware.py         gated official-driver demo (supported hosts only)
+scripts/run_six_axis_diagnostic.py  Quest-free six-axis arm/driver check
 scripts/setup_quest_usb.ps1     Windows ADB reverse setup
 tests/                          offline acceptance tests
 third_party/                    pinned official Trossen model submodules
