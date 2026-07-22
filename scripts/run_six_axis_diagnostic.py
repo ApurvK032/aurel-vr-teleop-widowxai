@@ -11,12 +11,20 @@ from pathlib import Path
 
 import numpy as np
 
-from run_hardware import (
-    make_startup_command_gate,
-    ramp_to_home,
-    return_to_rest,
-    teleop_gripper_limits,
-)
+if __package__:
+    from scripts.run_hardware import (
+        make_startup_command_gate,
+        ramp_to_home,
+        return_to_rest,
+        teleop_gripper_limits,
+    )
+else:
+    from run_hardware import (
+        make_startup_command_gate,
+        ramp_to_home,
+        return_to_rest,
+        teleop_gripper_limits,
+    )
 from widowxai_quest_teleop.config import load_config, resolve_project_path
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.hardware import (
@@ -197,15 +205,42 @@ def save_results(
 
 
 def print_summary(rows: list[dict[str, object]]) -> None:
+    if not rows:
+        print("diagnostic summary: no completed command rows")
+        return
+
+    def timing_summary(label: str, values: np.ndarray) -> None:
+        if values.size:
+            print(
+                f"{label}: p50={np.percentile(values, 50):.3f} ms, "
+                f"p95={np.percentile(values, 95):.3f} ms, "
+                f"max={np.max(values):.3f} ms"
+            )
+
     send_times = np.asarray([float(row["command_send_monotonic_ns"]) for row in rows])
-    if send_times.size >= 2:
+    realtime_paced = bool(rows[0]["realtime_paced"])
+    if realtime_paced and send_times.size >= 2:
         intervals_ms = np.diff(send_times) / 1e6
-        print(
-            "command intervals: "
-            f"p50={np.percentile(intervals_ms, 50):.3f} ms, "
-            f"p95={np.percentile(intervals_ms, 95):.3f} ms, "
-            f"max={np.max(intervals_ms):.3f} ms"
+        timing_summary("command intervals", intervals_ms)
+    timing_summary(
+        "driver send calls",
+        np.asarray([float(row["send_call_duration_ms"]) for row in rows]),
+    )
+    if realtime_paced:
+        timing_summary(
+            "schedule lateness",
+            np.asarray([float(row["schedule_lateness_ms"]) for row in rows]),
         )
+    timing_summary(
+        "feedback calls",
+        np.asarray(
+            [
+                float(row["feedback_call_duration_ms"])
+                for row in rows
+                if row["feedback_call_duration_ms"] != ""
+            ]
+        ),
+    )
     errors = np.asarray(
         [
             float(row["feedback_error_max_rad"])
@@ -228,6 +263,7 @@ def execute_plan(
     plan: DiagnosticPlan,
     config: dict,
     gripper_position_m: float,
+    rows: list[dict[str, object]],
     *,
     pace_realtime: bool,
 ) -> list[dict[str, object]]:
@@ -238,7 +274,6 @@ def execute_plan(
         round(plan.rate_hz / float(diagnostic["feedback_rate_hz"])),
     )
     feedback_q = plan.home_q.copy()
-    rows: list[dict[str, object]] = []
     started = time.perf_counter()
     current_motion = ""
 
@@ -251,24 +286,31 @@ def execute_plan(
                 f"{motion.label} ({motion.positive_label}, then {motion.negative_label})"
             )
 
+        loop_start_ns = time.perf_counter_ns()
+        late_by = loop_start_ns / 1e9 - (started + tick * period)
         if pace_realtime:
-            late_by = time.perf_counter() - (started + tick * period)
             if late_by > float(diagnostic["maximum_loop_overrun_s"]):
                 raise HardwareSafetyError(
                     f"diagnostic command loop overran by {late_by * 1000.0:.1f} ms"
                 )
 
         gate.validate(point.q_command, gripper_position_m)
+        send_start_ns = time.perf_counter_ns()
         backend.send_positions(
             point.q_command,
             gripper_position_m,
             include_gripper=False,
         )
         send_ns = time.perf_counter_ns()
+        send_duration_ms = (send_ns - send_start_ns) / 1e6
         feedback_fresh = False
         feedback_error: float | str = ""
+        feedback_duration_ms: float | str = ""
         if tick % feedback_stride == 0:
+            feedback_start_ns = time.perf_counter_ns()
             state = backend.read_state()
+            feedback_end_ns = time.perf_counter_ns()
+            feedback_duration_ms = (feedback_end_ns - feedback_start_ns) / 1e6
             feedback_q = state.q_arm.copy()
             feedback_fresh = True
             feedback_error = float(np.max(np.abs(feedback_q - point.q_command)))
@@ -284,8 +326,12 @@ def execute_plan(
             "motion_label": point.motion_label,
             "phase": point.phase,
             "planned_elapsed_s": tick * period,
+            "realtime_paced": pace_realtime,
+            "schedule_lateness_ms": late_by * 1000.0,
             "command_send_monotonic_ns": send_ns,
+            "send_call_duration_ms": send_duration_ms,
             "feedback_fresh": feedback_fresh,
+            "feedback_call_duration_ms": feedback_duration_ms,
             "feedback_error_max_rad": feedback_error,
         }
         row.update({f"q_cmd_{joint}": point.q_command[joint] for joint in range(6)})
@@ -379,6 +425,7 @@ def main() -> None:
         )
         print(
             f"preflight plan: {plan.duration_s:.1f} s at {plan.rate_hz:g} Hz, "
+            f"{float(diagnostic['command_goal_time_s']) * 1000.0:g} ms driver horizon, "
             f"{float(diagnostic['translation_amplitude_m']) * 1000.0:g} mm translations and "
             f"{np.degrees(float(diagnostic['rotation_amplitude_rad'])):g} deg rotations, "
             f"maximum planned joint speed={np.max(dynamics.max_velocity_rad_s):.3f} rad/s"
@@ -412,12 +459,13 @@ def main() -> None:
         )
         run_dir = create_run_dir(config, args.label)
         print("home reached: beginning deterministic six-axis sequence")
-        rows = execute_plan(
+        execute_plan(
             backend,
             command_gate,
             plan,
             config,
             settled.gripper_position_m,
+            rows,
             pace_realtime=args.live,
         )
         if args.live:
@@ -430,7 +478,7 @@ def main() -> None:
         print("six-axis sequence complete at home")
     except KeyboardInterrupt:
         print("operator stop: returning to rest before driver cleanup")
-    except (HardwareSafetyError, HardwareUnavailableError, ValueError) as exc:
+    except (HardwareSafetyError, HardwareUnavailableError, RuntimeError, ValueError) as exc:
         failure = exc
     finally:
         if run_dir is not None and plan is not None and dynamics is not None:

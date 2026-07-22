@@ -19,10 +19,10 @@ ik:
   max_dq_per_joint_rad: [0.06, 0.06, 0.06, 0.24, 0.24, 0.24]
 
 diagnostic:
-  # Match the successful teleoperation command cadence and driver horizon,
-  # but replace Quest input and online IK with a deterministic smooth plan.
+  # Keep the 90 Hz Quest cadence but use the previously smooth legacy-driver
+  # horizon. Only this value differs from the failed 15 ms diagnostic.
   command_rate_hz: 90.0
-  command_goal_time_s: 0.015
+  command_goal_time_s: 0.030
   # Representative of the 30%-scale teleoperation envelope: each test moves
   # this far to both sides of home, so translation spans 80 mm end-to-end and
   # rotation spans 20 degrees end-to-end.

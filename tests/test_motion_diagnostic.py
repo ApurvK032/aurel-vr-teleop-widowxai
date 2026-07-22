@@ -1,10 +1,14 @@
 import numpy as np
 import pytest
 
+from scripts.run_six_axis_diagnostic import execute_plan
 from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
+from widowxai_quest_teleop.hardware import CommandGate, HardwareState
 from widowxai_quest_teleop.motion_diagnostic import (
     DIAGNOSTIC_MOTIONS,
+    DiagnosticPlan,
+    DiagnosticPoint,
     build_six_axis_plan,
     minimum_snap_fraction,
     validate_plan_dynamics,
@@ -88,3 +92,64 @@ def test_six_axis_plan_rejects_amplitudes_that_do_not_converge(model) -> None:
             translation_amplitude_m=2.0,
             maximum_ik_iterations=2,
         )
+
+
+def test_partial_diagnostic_rows_survive_a_driver_exception() -> None:
+    limits = np.vstack([np.tile([-1.0, 1.0], (6, 1)), [0.0, 0.04]])
+    state = HardwareState(np.zeros(6), 0.02, limits, "dry-run")
+    motion = DIAGNOSTIC_MOTIONS[0]
+    plan = DiagnosticPlan(
+        np.zeros(6),
+        (
+            DiagnosticPoint(motion.key, motion.label, "first", np.zeros(6)),
+            DiagnosticPoint(motion.key, motion.label, "second", np.full(6, 0.001)),
+        ),
+        (),
+        90.0,
+    )
+    gate = CommandGate(
+        np.zeros(6),
+        0.02,
+        limits,
+        np.full(6, 0.01),
+        joint_limit_margin_rad=0.0,
+        gripper_limits_m=(0.0, 0.04),
+        max_gripper_delta_m=0.01,
+    )
+
+    class FailingBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def send_positions(self, _q, _gripper, *, include_gripper):
+            assert include_gripper is False
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("simulated connection loss")
+
+        def read_state(self):
+            return state
+
+    config = {
+        "diagnostic": {
+            "feedback_rate_hz": 20.0,
+            "maximum_loop_overrun_s": 0.05,
+            "maximum_tracking_error_rad": 0.08,
+        }
+    }
+    rows: list[dict[str, object]] = []
+    with pytest.raises(RuntimeError, match="connection loss"):
+        execute_plan(
+            FailingBackend(),
+            gate,
+            plan,
+            config,
+            0.02,
+            rows,
+            pace_realtime=False,
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["tick"] == 0
+    assert float(rows[0]["send_call_duration_ms"]) >= 0.0
+    assert float(rows[0]["feedback_call_duration_ms"]) >= 0.0
