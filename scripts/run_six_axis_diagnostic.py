@@ -73,10 +73,10 @@ def validate_diagnostic_config(config: dict) -> None:
         raise ValueError("driver interpolation cannot be disabled below 300 Hz")
     if goal_time > 0.2:
         raise ValueError("diagnostic command goal time must not exceed 200 ms")
-    if float(diagnostic["translation_amplitude_m"]) > 0.020:
-        raise ValueError("diagnostic translation amplitude is capped at 20 mm")
-    if float(diagnostic["rotation_amplitude_rad"]) > np.deg2rad(6.0):
-        raise ValueError("diagnostic rotation amplitude is capped at 6 degrees")
+    if float(diagnostic["translation_amplitude_m"]) > 0.050:
+        raise ValueError("diagnostic translation amplitude is capped at 50 mm")
+    if float(diagnostic["rotation_amplitude_rad"]) > np.deg2rad(12.0):
+        raise ValueError("diagnostic rotation amplitude is capped at 12 degrees")
     if float(diagnostic["segment_duration_s"]) < 0.75:
         raise ValueError("diagnostic segments must last at least 0.75 s")
     if float(diagnostic["feedback_rate_hz"]) > rate:
@@ -379,7 +379,8 @@ def main() -> None:
         )
         print(
             f"preflight plan: {plan.duration_s:.1f} s at {plan.rate_hz:g} Hz, "
-            f"12 mm translations and 3 deg rotations, "
+            f"{float(diagnostic['translation_amplitude_m']) * 1000.0:g} mm translations and "
+            f"{np.degrees(float(diagnostic['rotation_amplitude_rad'])):g} deg rotations, "
             f"maximum planned joint speed={np.max(dynamics.max_velocity_rad_s):.3f} rad/s"
         )
 

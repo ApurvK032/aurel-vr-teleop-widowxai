@@ -23,16 +23,19 @@ diagnostic:
   # but replace Quest input and online IK with a deterministic smooth plan.
   command_rate_hz: 90.0
   command_goal_time_s: 0.015
-  translation_amplitude_m: 0.012
-  rotation_amplitude_rad: 0.0523598776
-  segment_duration_s: 1.25
+  # Representative of the 30%-scale teleoperation envelope: each test moves
+  # this far to both sides of home, so translation spans 80 mm end-to-end and
+  # rotation spans 20 degrees end-to-end.
+  translation_amplitude_m: 0.040
+  rotation_amplitude_rad: 0.1745329252
+  segment_duration_s: 1.00
   pause_duration_s: 0.35
   feedback_rate_hz: 20.0
   maximum_endpoint_position_error_m: 0.001
   maximum_endpoint_orientation_error_rad: 0.0043633231
   maximum_ik_iterations: 300
   maximum_joint_step_rad: [0.008, 0.008, 0.008, 0.008, 0.008, 0.008]
-  maximum_joint_velocity_rad_s: [0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
+  maximum_joint_velocity_rad_s: [0.70, 0.70, 0.70, 0.70, 0.70, 0.70]
   maximum_joint_acceleration_rad_s2: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
   maximum_joint_jerk_rad_s3: [30.0, 30.0, 30.0, 30.0, 30.0, 30.0]
   maximum_tracking_error_rad: 0.08

@@ -72,8 +72,8 @@ def test_six_axis_plan_is_complete_smooth_and_collision_free(model) -> None:
         ),
         maximum_jerk_rad_s3=np.asarray(diagnostic["maximum_joint_jerk_rad_s3"]),
     )
-    assert np.max(dynamics.max_velocity_rad_s) < 0.2
-    assert np.max(dynamics.max_step_rad) < 0.003
+    assert np.max(dynamics.max_velocity_rad_s) < 0.6
+    assert np.max(dynamics.max_step_rad) < 0.007
 
 
 def test_six_axis_plan_rejects_amplitudes_that_do_not_converge(model) -> None:
