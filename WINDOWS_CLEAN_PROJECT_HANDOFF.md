@@ -6,9 +6,10 @@ Updated: 2026-07-20
 > remains useful for its calibration and hardware findings, but its proposed
 > architecture and baseline timing are historical. The user subsequently chose
 > to follow the article/reference control path directly. The implemented source
-> of truth is [README.md](README.md): 200 Hz single-step decoupled IK, the
-> reference per-joint delta caps, and direct MuJoCo `qpos` visualization. The
-> proposed 50/100 Hz Ruckig/actuator path is not part of the current project.
+> of truth is [README.md](README.md): the article/reference 200 Hz single-step
+> decoupled IK, reference pose gains and caps, immediate commands, and direct
+> MuJoCo `qpos` visualization. Earlier 50/100 Hz and 30 ms-horizon experiments
+> remain historical observations, not the implemented control path.
 > A gated 50%-gain physical demo is prepared, but the official Trossen driver
 > supports Ubuntu/macOS rather than native Windows, so live output fails closed
 > on this PC. See the README physical-demo section.

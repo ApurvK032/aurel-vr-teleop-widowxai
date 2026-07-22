@@ -7,7 +7,7 @@ name = "widowxai-quest-teleop"
 version = "0.1.0"
 description = "Simulation-first Meta Quest 3 teleoperation for the Trossen WidowXAI"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
   "fastapi>=0.116,<1",
@@ -20,7 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.4,<10"]
-hardware = ["trossen-arm==1.11.0; platform_system != 'Windows'"]
+# The local arm runs controller firmware 1.8.3. The previously successful
+# hardware environment used the compatible CPython 3.10 driver 1.8.6.
+hardware = ["trossen-arm==1.8.6; platform_system != 'Windows'"]
 placo = ["placo>=0.9.23,<1"]
 
 [project.scripts]

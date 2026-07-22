@@ -107,6 +107,50 @@ class WidowXAIModel:
         q = np.asarray(q_arm, dtype=float).reshape(6)
         return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
 
+    def in_self_collision(self, q_arm: np.ndarray, gripper_q: float = 0.044) -> bool:
+        """Check the official model's collision geometry at one commanded pose."""
+
+        self.data.qpos[:] = 0.0
+        self.data.qpos[self.qpos_indices] = np.asarray(q_arm, dtype=float).reshape(6)
+        self.data.qpos[self.gripper_qpos_indices] = float(gripper_q)
+        mujoco.mj_forward(self.model, self.data)
+        for index in range(self.data.ncon):
+            contact = self.data.contact[index]
+            body_1 = self.model.geom_bodyid[contact.geom1]
+            body_2 = self.model.geom_bodyid[contact.geom2]
+            names = {
+                mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_1),
+                mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_2),
+            }
+            # The two carriage collision boxes intentionally meet when the
+            # valid gripper closes; this is not an arm self-collision.
+            if names == {"carriage_right", "carriage_left"}:
+                continue
+            return True
+        return False
+
+    def first_self_collision_on_path(
+        self,
+        start_q: np.ndarray,
+        end_q: np.ndarray,
+        *,
+        start_gripper_q: float = 0.044,
+        end_gripper_q: float = 0.044,
+        samples: int = 251,
+    ) -> float | None:
+        """Return the first colliding interpolation fraction, if any."""
+
+        start = np.asarray(start_q, dtype=float).reshape(6)
+        end = np.asarray(end_q, dtype=float).reshape(6)
+        for alpha in np.linspace(0.0, 1.0, max(2, int(samples))):
+            q = start + alpha * (end - start)
+            gripper = float(start_gripper_q) + alpha * (
+                float(end_gripper_q) - float(start_gripper_q)
+            )
+            if self.in_self_collision(q, gripper):
+                return float(alpha)
+        return None
+
     def set_viewer_qpos(self, data: mujoco.MjData, q_arm: np.ndarray, gripper_q: float) -> None:
         """Apply commands exactly as the reference kit's passive viewer does."""
         data.qpos[self.qpos_indices] = np.asarray(q_arm, dtype=float).reshape(6)

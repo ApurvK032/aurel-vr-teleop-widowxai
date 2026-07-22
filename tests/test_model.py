@@ -65,3 +65,15 @@ def test_viewer_qpos_is_applied_directly(model: WidowXAIModel) -> None:
     model.set_viewer_qpos(data, q, 0.031)
     np.testing.assert_array_equal(data.qpos[model.qpos_indices], q)
     np.testing.assert_array_equal(data.qpos[model.gripper_qpos_indices], [0.031, 0.031])
+
+
+def test_startup_path_collision_check_uses_official_geometry(model: WidowXAIModel) -> None:
+    staged = np.array([0.0, np.pi / 3, np.pi / 6, np.pi / 5, 0.0, 0.0])
+    assert model.first_self_collision_on_path(np.zeros(6), staged) is None
+    assert not model.in_self_collision(staged, gripper_q=0.0)
+
+    known_colliding = np.array(
+        [0.74635137, 3.10690731, 0.50730820, -1.06747787, 0.35355442, -2.86549445]
+    )
+    assert model.in_self_collision(known_colliding)
+    assert model.first_self_collision_on_path(known_colliding, staged) == 0.0

@@ -1,6 +1,6 @@
 import numpy as np
 
-from widowxai_quest_teleop.pose_filter import pose_ema
+from widowxai_quest_teleop.pose_filter import ControllerPoseFilter, pose_ema, pose_filter_alphas
 from widowxai_quest_teleop.sample_buffer import LatestValueMailbox
 from widowxai_quest_teleop.safety import FreshSequenceWatchdog
 from widowxai_quest_teleop.transport import parse_pose_message
@@ -16,6 +16,15 @@ def test_latest_mailbox_overwrites_old_state() -> None:
     assert value == 2
     assert generation == 2
     assert mailbox.overwrite_count == 1
+
+
+def test_wait_take_latest_consumes_the_new_generation() -> None:
+    mailbox: LatestValueMailbox[int] = LatestValueMailbox()
+    mailbox.publish(4)
+    value, generation = mailbox.wait_take_latest(0, timeout_s=0.01)
+    assert (value, generation) == (4, 1)
+    assert mailbox.take_latest() == (None, 1)
+    assert mailbox.wait_take_latest(generation, timeout_s=0.0) == (None, generation)
 
 
 def test_transport_parses_webxr_xyzw_as_internal_wxyz() -> None:
@@ -55,10 +64,28 @@ def test_watchdog_requires_fresh_window_and_times_out() -> None:
         }
     )
     watchdog = FreshSequenceWatchdog(0.01, fresh_samples_to_recover=2)
-    assert not watchdog.observe(base).fresh
+    assert not watchdog.observe(base, now_ns=base.pc_arrival_monotonic_ns).fresh
     second = type(base)(**{**base.__dict__, "sequence": 2, "pc_arrival_monotonic_ns": base.pc_arrival_monotonic_ns + 1})
-    assert watchdog.observe(second).fresh
+    assert watchdog.observe(second, now_ns=second.pc_arrival_monotonic_ns).fresh
     assert not watchdog.poll(second.pc_arrival_monotonic_ns + 20_000_000).fresh
+
+
+def test_watchdog_rejects_a_unique_sample_delayed_in_the_mailbox() -> None:
+    sample = parse_pose_message(
+        {
+            "type": "pose",
+            "sequence": 1,
+            "capture_monotonic_ms": 0,
+            "capture_epoch_ms": 0,
+            "send_monotonic_ms": 0,
+            "left": {"position": [0, 0, 0], "orientation_xyzw": [0, 0, 0, 1]},
+        }
+    )
+    watchdog = FreshSequenceWatchdog(0.01, fresh_samples_to_recover=1)
+    consumed_20_ms_late = sample.pc_arrival_monotonic_ns + 20_000_000
+    status = watchdog.observe(sample, now_ns=consumed_20_ms_late)
+    assert not status.fresh
+    assert status.age_s == 0.02
 
 
 def test_pose_ema_matches_reference_position_and_quaternion_nlerp() -> None:
@@ -67,6 +94,70 @@ def test_pose_ema_matches_reference_position_and_quaternion_nlerp() -> None:
     filtered = pose_ema(previous, current, 0.8)
     np.testing.assert_allclose(filtered.position, np.full(3, 0.8))
     np.testing.assert_allclose(filtered.quaternion_wxyz, [0.86824314, 0.49613894, 0.0, 0.0])
+
+
+def test_pose_ema_can_smooth_rotation_more_than_translation() -> None:
+    previous = Pose(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    current = Pose(np.ones(3), np.array([0.8, 0.6, 0.0, 0.0]))
+    filtered = pose_ema(previous, current, 0.8, 0.5)
+
+    np.testing.assert_allclose(filtered.position, np.full(3, 0.8))
+    np.testing.assert_allclose(filtered.quaternion_wxyz, [0.9486833, 0.31622777, 0.0, 0.0])
+
+
+def test_pose_filter_alphas_fall_back_to_shared_weight() -> None:
+    assert pose_filter_alphas({"pose_filter_alpha": 0.8}) == (0.8, 0.8)
+    assert pose_filter_alphas(
+        {
+            "pose_filter_alpha": 0.8,
+            "pose_filter_translation_alpha": 0.7,
+            "pose_filter_rotation_alpha": 0.4,
+        }
+    ) == (0.7, 0.4)
+
+
+def test_adaptive_rotation_filter_opens_bandwidth_for_deliberate_motion() -> None:
+    pose_filter = ControllerPoseFilter(
+        {
+            "pose_filter_alpha": 0.8,
+            "adaptive_rotation_filter": {
+                "enabled": True,
+                "minimum_cutoff_hz": 1.5,
+                "speed_coefficient": 20.0,
+                "speed_exponent": 2.0,
+                "derivative_cutoff_hz": 2.0,
+                "maximum_cutoff_hz": 35.0,
+            },
+        }
+    )
+    origin = Pose(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    tiny = Pose(np.ones(3), np.array([0.9999995, 0.001, 0.0, 0.0]))
+    fast = Pose(np.ones(3) * 2.0, np.array([0.99500417, 0.09983342, 0.0, 0.0]))
+
+    pose_filter.update(origin, 0.0)
+    tiny_filtered = pose_filter.update(tiny, 1.0 / 90.0)
+    tiny_alpha = pose_filter.rotation_alpha
+    fast_filtered = pose_filter.update(fast, 2.0 / 90.0)
+
+    assert tiny_alpha < pose_filter.rotation_alpha
+    assert pose_filter.rotation_cutoff_hz <= 35.0
+    np.testing.assert_allclose(tiny_filtered.position, np.full(3, 0.8))
+    np.testing.assert_allclose(fast_filtered.position, np.full(3, 1.76))
+
+
+def test_adaptive_rotation_filter_reset_reanchors_without_a_jump() -> None:
+    pose_filter = ControllerPoseFilter(
+        {
+            "pose_filter_alpha": 0.8,
+            "adaptive_rotation_filter": {"enabled": True},
+        }
+    )
+    first = Pose(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    second = Pose(np.ones(3), np.array([0.9, 0.1, 0.2, 0.3]))
+    pose_filter.update(first, 0.0)
+    pose_filter.reset()
+
+    assert pose_filter.update(second, 1.0) is second
 
 
 def test_wrist_pivot_calibration_recovers_controller_frame_offset() -> None:

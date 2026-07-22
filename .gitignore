@@ -1,4 +1,5 @@
 .venv/
+.venv-arm18/
 __pycache__/
 *.py[cod]
 .pytest_cache/

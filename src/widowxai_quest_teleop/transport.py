@@ -55,6 +55,8 @@ class QuestReceiver:
         self.last_error: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._websocket_lock = threading.Lock()
+        self._websocket = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -65,25 +67,52 @@ class QuestReceiver:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._websocket_lock:
+            websocket = self._websocket
+        if websocket is not None:
+            try:
+                websocket.close()
+            except Exception:
+                pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+    def publish(self, payload: dict[str, Any]) -> bool:
+        """Publish a control-state event through the relay connection."""
+
+        with self._websocket_lock:
+            websocket = self._websocket
+        if websocket is None:
+            return False
+        try:
+            websocket.send(json.dumps(payload, separators=(",", ":")))
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+        return True
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
                 with connect(self.websocket_url, open_timeout=2.0, close_timeout=1.0) as websocket:
-                    self.reconnects += 1
-                    self.last_error = None
-                    for raw in websocket:
-                        if self._stop.is_set():
-                            break
-                        try:
-                            sample = parse_pose_message(raw)
-                        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-                            self.bad_messages += 1
-                            continue
-                        self.mailbox.publish(sample)
+                    with self._websocket_lock:
+                        self._websocket = websocket
+                    try:
+                        self.reconnects += 1
+                        self.last_error = None
+                        for raw in websocket:
+                            if self._stop.is_set():
+                                break
+                            try:
+                                sample = parse_pose_message(raw)
+                            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                                self.bad_messages += 1
+                                continue
+                            self.mailbox.publish(sample)
+                    finally:
+                        with self._websocket_lock:
+                            if self._websocket is websocket:
+                                self._websocket = None
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 self._stop.wait(0.5)
-

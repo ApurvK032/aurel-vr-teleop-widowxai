@@ -67,6 +67,9 @@ function connectRelay() {
       const actuator = leftInputSource.gamepad.hapticActuators?.[0];
       if (actuator) actuator.pulse(Math.max(0, Math.min(1, Number(message.intensity) || 0)), Number(message.duration_ms) || 40);
     }
+    if (message.type === "calibration_prompt" && typeof message.text === "string") {
+      setStatus(message.text, true);
+    }
   };
 }
 
@@ -98,6 +101,18 @@ function transformObject(transform, offset = [0, 0, 0]) {
     position: shiftedPosition(transform, offset),
     orientation_xyzw: [transform.orientation.x, transform.orientation.y, transform.orientation.z, transform.orientation.w],
   };
+}
+
+function sendLatestPacket() {
+  if (!latestPacket || !socket || socket.readyState !== WebSocket.OPEN) return false;
+  if (socket.bufferedAmount > 2048) return false;
+  const packet = latestPacket;
+  latestPacket = null;
+  packet.send_monotonic_ms = performance.now();
+  socket.send(JSON.stringify(packet));
+  sent += 1;
+  sentText.textContent = sent;
+  return true;
 }
 
 function solve3x3(a, b) {
@@ -207,20 +222,12 @@ function onXRFrame(frameTime, frame) {
   if (latestPacket !== null) coalesced += 1;
   latestPacket = nextPacket;
   captured += 1;
+  // Send in the same WebXR callback that produced the pose. A separate 120 Hz
+  // timer added an avoidable 0-8.3 ms phase wait before every packet.
+  sendLatestPacket();
   capturedText.textContent = captured;
   coalescedText.textContent = coalesced;
 }
-
-setInterval(() => {
-  if (!latestPacket || !socket || socket.readyState !== WebSocket.OPEN) return;
-  if (socket.bufferedAmount > 2048) return;
-  const packet = latestPacket;
-  latestPacket = null;
-  packet.send_monotonic_ms = performance.now();
-  socket.send(JSON.stringify(packet));
-  sent += 1;
-  sentText.textContent = sent;
-}, 1000 / 120);
 
 enterButton.addEventListener("click", async () => {
   try {

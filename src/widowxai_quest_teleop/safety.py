@@ -1,9 +1,79 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from time import perf_counter_ns
 
+import numpy as np
+
 from .types import QuestSample
+
+
+class TimeAlignedCommandHistory:
+    """Interpolate the command that encoder feedback should have reached.
+
+    Non-blocking position commands are intentionally interpolated by the arm
+    controller. Comparing feedback with the newest command therefore reports
+    ordinary interpolation/transport lag as tracking error. This short history
+    provides a delayed command reference while retaining a bounded stall check.
+    """
+
+    def __init__(
+        self,
+        initial_command: np.ndarray,
+        initial_time_s: float,
+        delay_s: float,
+        *,
+        retention_s: float = 0.5,
+    ) -> None:
+        command = np.asarray(initial_command, dtype=float).reshape(-1)
+        timestamp = float(initial_time_s)
+        delay = float(delay_s)
+        retention = float(retention_s)
+        if not np.all(np.isfinite(command)):
+            raise ValueError("initial command must be finite")
+        if not np.isfinite(timestamp):
+            raise ValueError("initial command time must be finite")
+        if not np.isfinite(delay) or delay < 0.0:
+            raise ValueError("tracking delay must be finite and nonnegative")
+        if not np.isfinite(retention) or retention <= delay:
+            raise ValueError("command-history retention must exceed the tracking delay")
+        self.delay_s = delay
+        self.retention_s = retention
+        self._times: deque[float] = deque([timestamp])
+        self._commands: deque[np.ndarray] = deque([command.copy()])
+
+    def append(self, timestamp_s: float, command: np.ndarray) -> None:
+        timestamp = float(timestamp_s)
+        value = np.asarray(command, dtype=float).reshape(self._commands[0].shape)
+        if not np.isfinite(timestamp) or timestamp <= self._times[-1]:
+            raise ValueError("command timestamps must be finite and strictly increasing")
+        if not np.all(np.isfinite(value)):
+            raise ValueError("command must be finite")
+        self._times.append(timestamp)
+        self._commands.append(value.copy())
+        cutoff = timestamp - self.retention_s
+        while len(self._times) > 2 and self._times[1] < cutoff:
+            self._times.popleft()
+            self._commands.popleft()
+
+    def reference_at(self, feedback_time_s: float) -> np.ndarray:
+        feedback_time = float(feedback_time_s)
+        if not np.isfinite(feedback_time):
+            raise ValueError("feedback time must be finite")
+        target_time = feedback_time - self.delay_s
+        if target_time <= self._times[0]:
+            return self._commands[0].copy()
+        if target_time >= self._times[-1]:
+            return self._commands[-1].copy()
+        for index in range(len(self._times) - 1):
+            before_time = self._times[index]
+            after_time = self._times[index + 1]
+            if target_time <= after_time:
+                alpha = (target_time - before_time) / (after_time - before_time)
+                return (1.0 - alpha) * self._commands[index] + alpha * self._commands[index + 1]
+        raise RuntimeError("failed to interpolate command history")
+
 
 @dataclass(frozen=True)
 class FreshnessStatus:
@@ -26,7 +96,7 @@ class FreshSequenceWatchdog:
         self._recovery_streak = 0
         self._fresh = False
 
-    def observe(self, sample: QuestSample) -> FreshnessStatus:
+    def observe(self, sample: QuestSample, now_ns: int | None = None) -> FreshnessStatus:
         generation_changed = sample.reconnect_generation != self.last_reconnect_generation
         unique = generation_changed or sample.sequence != self.last_sequence
         if generation_changed:
@@ -42,7 +112,10 @@ class FreshSequenceWatchdog:
                 self._fresh = True
         else:
             self.repeated_samples += 1
-        return self.poll(sample.pc_arrival_monotonic_ns)
+        # Judge freshness when the control loop consumes the sample, not when the
+        # receiver thread put it in the mailbox. A delayed mailbox sample must
+        # never receive one apparently-fresh control tick.
+        return self.poll(now_ns)
 
     def poll(self, now_ns: int | None = None) -> FreshnessStatus:
         now = perf_counter_ns() if now_ns is None else int(now_ns)
