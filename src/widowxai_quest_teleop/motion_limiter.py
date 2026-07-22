@@ -25,6 +25,17 @@ def configured_minimum_command_interval(control: dict) -> float:
     return interval
 
 
+def configured_command_spacing_stage(control: dict) -> str:
+    """Return where a configured command interval is enforced."""
+
+    stage = str(control.get("command_spacing_stage", "before_consume"))
+    if stage not in ("before_consume", "before_send"):
+        raise ValueError(
+            "command spacing stage must be 'before_consume' or 'before_send'"
+        )
+    return stage
+
+
 def minimum_command_spacing_wait(
     last_send_s: float,
     minimum_interval_s: float,

@@ -30,6 +30,8 @@ TELEMETRY_COLUMNS = [
     "feedback_read_monotonic_ns",
     "feedback_sample_fresh",
     "command_spacing_wait_ms",
+    "command_pre_consume_wait_ms",
+    "command_pre_send_wait_ms",
     "mailbox_overwrite_count",
     "reconnect_generation",
     "quest_grip",

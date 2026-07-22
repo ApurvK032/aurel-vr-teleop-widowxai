@@ -14,6 +14,7 @@ from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
 from widowxai_quest_teleop.motion_limiter import (
     bounded_command_period,
+    configured_command_spacing_stage,
     configured_minimum_command_interval,
     limiter_from_config,
     minimum_command_spacing_wait,
@@ -76,10 +77,13 @@ def main() -> None:
     quest_synchronized = update_mode == "quest_synchronized"
     try:
         minimum_command_interval_s = configured_minimum_command_interval(config["control"])
+        command_spacing_stage = configured_command_spacing_stage(config["control"])
     except ValueError as exc:
         raise SystemExit(f"invalid command spacing: {exc}") from None
     if minimum_command_interval_s > 0.0 and not quest_synchronized:
         raise SystemExit("minimum command spacing requires quest_synchronized updates")
+    if minimum_command_interval_s <= 0.0 and "command_spacing_stage" in config["control"]:
+        raise SystemExit("command spacing stage requires a positive minimum interval")
     controller_filter = ControllerPoseFilter(config["control"])
     joint_limiter = limiter_from_config(
         config["control"].get("joint_command_limits"),
@@ -104,15 +108,17 @@ def main() -> None:
     try:
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
             while args.duration <= 0.0 or time.perf_counter() - started < args.duration:
-                command_spacing_wait_s = 0.0
+                pre_consume_wait_s = 0.0
+                pre_send_wait_s = 0.0
                 if quest_synchronized:
-                    command_spacing_wait_s = minimum_command_spacing_wait(
-                        last_command_send_s,
-                        minimum_command_interval_s,
-                        time.perf_counter(),
-                    )
-                    if command_spacing_wait_s > 0.0:
-                        time.sleep(command_spacing_wait_s)
+                    if command_spacing_stage == "before_consume":
+                        pre_consume_wait_s = minimum_command_spacing_wait(
+                            last_command_send_s,
+                            minimum_command_interval_s,
+                            time.perf_counter(),
+                        )
+                        if pre_consume_wait_s > 0.0:
+                            time.sleep(pre_consume_wait_s)
                     sample, mailbox_generation = receiver.mailbox.wait_take_latest(
                         mailbox_generation,
                         dt,
@@ -188,10 +194,13 @@ def main() -> None:
                     filtered_controller = None
                     controller_filter.reset()
                 if target_active:
-                    limiter_dt = bounded_command_period(
-                        time.perf_counter() - last_command_send_s,
-                        loop_hz,
-                    )
+                    limiter_elapsed_s = time.perf_counter() - last_command_send_s
+                    if quest_synchronized and command_spacing_stage == "before_send":
+                        limiter_elapsed_s = max(
+                            limiter_elapsed_s,
+                            minimum_command_interval_s,
+                        )
+                    limiter_dt = bounded_command_period(limiter_elapsed_s, loop_hz)
                     if joint_limiter is None:
                         q_command = q_des.copy()
                     else:
@@ -204,6 +213,14 @@ def main() -> None:
                         gripper_result = gripper_limiter.step(np.array([gripper_des]), limiter_dt)
                         gripper_q = float(gripper_result.command[0])
                         limiter_flags.extend(gripper_result.flags("gripper"))
+                if quest_synchronized and command_spacing_stage == "before_send":
+                    pre_send_wait_s = minimum_command_spacing_wait(
+                        last_command_send_s,
+                        minimum_command_interval_s,
+                        time.perf_counter(),
+                    )
+                    if pre_send_wait_s > 0.0:
+                        time.sleep(pre_send_wait_s)
                 model.set_viewer_qpos(sim_data, q_command, gripper_q)
                 q_feedback = sim_data.qpos[model.qpos_indices].copy()
                 _, wrist_pose = model.fk(q_feedback)
@@ -230,7 +247,9 @@ def main() -> None:
                     ik_start_monotonic_ns=ik_start,
                     ik_end_monotonic_ns=ik_end,
                     command_send_monotonic_ns=command_send_ns,
-                    command_spacing_wait_ms=command_spacing_wait_s * 1000.0,
+                    command_spacing_wait_ms=(pre_consume_wait_s + pre_send_wait_s) * 1000.0,
+                    command_pre_consume_wait_ms=pre_consume_wait_s * 1000.0,
+                    command_pre_send_wait_ms=pre_send_wait_s * 1000.0,
                     mailbox_overwrite_count=receiver.mailbox.overwrite_count,
                     reconnect_generation="" if last_sample is None else last_sample.reconnect_generation,
                     quest_grip="" if last_sample is None else last_sample.grip,

@@ -23,6 +23,7 @@ from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
 from widowxai_quest_teleop.motion_limiter import (
     bounded_command_period,
+    configured_command_spacing_stage,
     configured_minimum_command_interval,
     limiter_from_config,
     minimum_command_spacing_wait,
@@ -74,6 +75,10 @@ def validate_hardware_config(config: dict) -> None:
         if not np.isfinite(value) or value < 0.0:
             raise HardwareSafetyError(f"{name} must be finite and nonnegative")
     minimum_command_interval = float(control.get("minimum_command_interval_s", 0.0))
+    try:
+        command_spacing_stage = configured_command_spacing_stage(control)
+    except ValueError as exc:
+        raise HardwareSafetyError(str(exc)) from None
     if minimum_command_interval > 0.0 and update_mode != "quest_synchronized":
         raise HardwareSafetyError(
             "control.minimum_command_interval_s requires quest_synchronized updates"
@@ -81,6 +86,11 @@ def validate_hardware_config(config: dict) -> None:
     if minimum_command_interval >= float(quest["stale_timeout_s"]):
         raise HardwareSafetyError(
             "control.minimum_command_interval_s must be shorter than the stale timeout"
+        )
+    if minimum_command_interval <= 0.0 and "command_spacing_stage" in control:
+        raise HardwareSafetyError(
+            f"control.command_spacing_stage={command_spacing_stage!r} requires a positive "
+            "minimum command interval"
         )
 
     max_delta = np.asarray(config["ik"]["max_dq_per_joint_rad"], dtype=float).reshape(6)
@@ -616,6 +626,7 @@ def main() -> None:
         update_mode = control.get("update_mode", "fixed_rate")
         quest_synchronized = update_mode == "quest_synchronized"
         minimum_command_interval_s = configured_minimum_command_interval(control)
+        command_spacing_stage = configured_command_spacing_stage(control)
         feedback_stride = max(1, round(loop_hz / float(hardware["feedback_check_rate_hz"])))
         feedback_period = 1.0 / float(hardware["feedback_check_rate_hz"])
         duration_limit = float(hardware["max_demo_duration_s"])
@@ -652,23 +663,24 @@ def main() -> None:
         )
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
             while time.perf_counter() - started < duration:
-                command_spacing_wait_s = 0.0
+                pre_consume_wait_s = 0.0
+                pre_send_wait_s = 0.0
                 if quest_synchronized:
-                    command_spacing_wait_s = minimum_command_spacing_wait(
-                        last_command_send_s,
-                        minimum_command_interval_s,
-                        time.perf_counter(),
-                    )
-                    remaining_s = duration - (time.perf_counter() - started)
-                    if command_spacing_wait_s >= remaining_s:
-                        if remaining_s > 0.0:
-                            time.sleep(remaining_s)
-                        break
-                    if command_spacing_wait_s > 0.0:
-                        # Do not consume a queued frame until the physical send
-                        # slot opens. The capacity-one mailbox keeps only the
-                        # newest pose received during this wait.
-                        time.sleep(command_spacing_wait_s)
+                    if command_spacing_stage == "before_consume":
+                        pre_consume_wait_s = minimum_command_spacing_wait(
+                            last_command_send_s,
+                            minimum_command_interval_s,
+                            time.perf_counter(),
+                        )
+                        remaining_s = duration - (time.perf_counter() - started)
+                        if pre_consume_wait_s >= remaining_s:
+                            if remaining_s > 0.0:
+                                time.sleep(remaining_s)
+                            break
+                        if pre_consume_wait_s > 0.0:
+                            # Milestone-2 behavior: wait for the slot before
+                            # consuming, so queued frames collapse to latest.
+                            time.sleep(pre_consume_wait_s)
                     remaining_s = duration - (time.perf_counter() - started)
                     if remaining_s <= 0.0:
                         break
@@ -763,10 +775,15 @@ def main() -> None:
                     controller_filter.reset()
 
                 if target_active:
-                    limiter_dt = bounded_command_period(
-                        time.perf_counter() - last_command_send_s,
-                        loop_hz,
-                    )
+                    limiter_elapsed_s = time.perf_counter() - last_command_send_s
+                    if quest_synchronized and command_spacing_stage == "before_send":
+                        # The final barrier guarantees this much outgoing time
+                        # even though the limiter runs shortly before it.
+                        limiter_elapsed_s = max(
+                            limiter_elapsed_s,
+                            minimum_command_interval_s,
+                        )
+                    limiter_dt = bounded_command_period(limiter_elapsed_s, loop_hz)
                     if joint_limiter is None:
                         q_command = q_des.copy()
                     else:
@@ -782,6 +799,22 @@ def main() -> None:
                 command_gate.validate(q_command, gripper_command)
                 if model.in_self_collision(q_command, gripper_command):
                     raise HardwareSafetyError("pinned 2025 MuJoCo model predicts a self-collision")
+                if quest_synchronized and command_spacing_stage == "before_send":
+                    pre_send_wait_s = minimum_command_spacing_wait(
+                        last_command_send_s,
+                        minimum_command_interval_s,
+                        time.perf_counter(),
+                    )
+                    remaining_s = duration - (time.perf_counter() - started)
+                    if pre_send_wait_s >= remaining_s:
+                        if remaining_s > 0.0:
+                            time.sleep(remaining_s)
+                        break
+                    if pre_send_wait_s > 0.0:
+                        # Low-latency behavior: consume and solve immediately,
+                        # then enforce the no-burst interval at the final send
+                        # boundary. An overrun is never repaid with catch-up.
+                        time.sleep(pre_send_wait_s)
                 backend.send_positions(
                     q_command,
                     gripper_command,
@@ -830,7 +863,9 @@ def main() -> None:
                     command_send_epoch_ns=command_send_epoch_ns,
                     feedback_read_monotonic_ns=feedback_read_ns,
                     feedback_sample_fresh=feedback_sample_fresh,
-                    command_spacing_wait_ms=command_spacing_wait_s * 1000.0,
+                    command_spacing_wait_ms=(pre_consume_wait_s + pre_send_wait_s) * 1000.0,
+                    command_pre_consume_wait_ms=pre_consume_wait_s * 1000.0,
+                    command_pre_send_wait_ms=pre_send_wait_s * 1000.0,
                     mailbox_overwrite_count=receiver.mailbox.overwrite_count,
                     reconnect_generation="" if last_sample is None else last_sample.reconnect_generation,
                     quest_grip="" if last_sample is None else last_sample.grip,

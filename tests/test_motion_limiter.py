@@ -4,6 +4,7 @@ import pytest
 from widowxai_quest_teleop.motion_limiter import (
     AccelerationLimitedCommand,
     bounded_command_period,
+    configured_command_spacing_stage,
     configured_minimum_command_interval,
     minimum_command_spacing_wait,
 )
@@ -24,6 +25,10 @@ def test_minimum_command_spacing_never_repays_a_late_interval() -> None:
     assert configured_minimum_command_interval(
         {"minimum_command_interval_s": interval}
     ) == pytest.approx(interval)
+    assert configured_command_spacing_stage({}) == "before_consume"
+    assert configured_command_spacing_stage(
+        {"command_spacing_stage": "before_send"}
+    ) == "before_send"
 
 
 def test_minimum_command_spacing_rejects_invalid_values() -> None:
@@ -31,6 +36,27 @@ def test_minimum_command_spacing_rejects_invalid_values() -> None:
         configured_minimum_command_interval({"minimum_command_interval_s": -0.1})
     with pytest.raises(ValueError, match="nonnegative"):
         minimum_command_spacing_wait(1.0, np.nan, 1.0)
+    with pytest.raises(ValueError, match="spacing stage"):
+        configured_command_spacing_stage({"command_spacing_stage": "somewhere"})
+
+
+def test_final_send_barrier_holds_early_frames_without_catchup() -> None:
+    interval = 1.0 / 90.0
+    processing_s = 0.0025
+    arrivals = [0.0, interval, 2.0 * interval, 0.050, 0.0505]
+    sends = [arrivals[0] + processing_s]
+
+    for arrival in arrivals[1:]:
+        ready_to_send = arrival + processing_s
+        wait = minimum_command_spacing_wait(sends[-1], interval, ready_to_send)
+        sends.append(ready_to_send + wait)
+
+    intervals = np.diff(sends)
+    assert np.all(intervals >= interval - 1e-12)
+    # A late arrival is sent immediately, but the following early arrival is
+    # held relative to that actual send rather than an old absolute timeline.
+    assert sends[3] == pytest.approx(arrivals[3] + processing_s)
+    assert sends[4] == pytest.approx(sends[3] + interval)
 
 
 def test_limiter_respects_velocity_and_acceleration_bounds() -> None:

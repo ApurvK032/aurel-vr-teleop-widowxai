@@ -590,6 +590,36 @@ def test_no_catchup_profiles_change_only_cadence_and_driver_horizon() -> None:
     assert simulation["quest"] == baseline_sim["quest"]
 
 
+def test_send_barrier_profiles_change_only_command_spacing_policy() -> None:
+    baseline_hardware = load_config("configs/no_catchup_30pct_hardware.yaml")
+    hardware = load_config("configs/send_barrier_30pct_hardware.yaml")
+    baseline_sim = load_config("configs/no_catchup_30pct_mujoco.yaml")
+    simulation = load_config("configs/send_barrier_30pct_mujoco.yaml")
+
+    validate_hardware_config(hardware)
+    validate_live_hardware_timing(hardware)
+    assert hardware["control"]["command_spacing_stage"] == "before_send"
+    assert simulation["control"]["command_spacing_stage"] == "before_send"
+    assert hardware["control"]["minimum_command_interval_s"] == pytest.approx(0.008)
+    assert simulation["control"]["minimum_command_interval_s"] == pytest.approx(0.008)
+
+    hardware_control = dict(hardware["control"])
+    simulation_control = dict(simulation["control"])
+    baseline_hardware_control = dict(baseline_hardware["control"])
+    baseline_sim_control = dict(baseline_sim["control"])
+    hardware_control.pop("command_spacing_stage")
+    simulation_control.pop("command_spacing_stage")
+    hardware_control.pop("minimum_command_interval_s")
+    simulation_control.pop("minimum_command_interval_s")
+    baseline_hardware_control.pop("minimum_command_interval_s")
+    baseline_sim_control.pop("minimum_command_interval_s")
+    assert hardware_control == baseline_hardware_control
+    assert simulation_control == baseline_sim_control
+    for section in ("model", "quest", "ik", "hardware", "telemetry"):
+        assert hardware[section] == baseline_hardware[section]
+        assert simulation[section] == baseline_sim[section]
+
+
 def test_hardware_config_rejects_incompatible_minimum_command_spacing() -> None:
     config = load_config("configs/smooth_30pct_full_gripper.yaml")
     config["control"]["minimum_command_interval_s"] = np.nan
@@ -605,6 +635,16 @@ def test_hardware_config_rejects_incompatible_minimum_command_spacing() -> None:
     config = load_config("configs/smooth_30pct_full_gripper.yaml")
     config["control"]["minimum_command_interval_s"] = config["quest"]["stale_timeout_s"]
     with pytest.raises(HardwareSafetyError, match="stale timeout"):
+        validate_hardware_config(config)
+
+    config = load_config("configs/no_catchup_30pct_hardware.yaml")
+    config["control"]["command_spacing_stage"] = "after_everything"
+    with pytest.raises(HardwareSafetyError, match="spacing stage"):
+        validate_hardware_config(config)
+
+    config = load_config("configs/smooth_30pct_full_gripper.yaml")
+    config["control"]["command_spacing_stage"] = "before_send"
+    with pytest.raises(HardwareSafetyError, match="positive minimum"):
         validate_hardware_config(config)
 
 
