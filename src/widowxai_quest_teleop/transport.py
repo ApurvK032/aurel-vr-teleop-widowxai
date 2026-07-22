@@ -25,7 +25,11 @@ def parse_pose_message(raw: str | dict[str, Any]) -> QuestSample:
         np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=float),
     )
     head_wxyz = None
-    head = payload.get("head")
+    # Prefer the session-locked operator frame from new clients. Older clients
+    # and recordings still work through the live-head fallback.
+    head = payload.get("operator_head")
+    if not isinstance(head, dict) or "orientation_xyzw" not in head:
+        head = payload.get("head")
     if isinstance(head, dict) and "orientation_xyzw" in head:
         head_xyzw = np.asarray(head["orientation_xyzw"], dtype=float).reshape(4)
         head_wxyz = np.array([head_xyzw[3], head_xyzw[0], head_xyzw[1], head_xyzw[2]])

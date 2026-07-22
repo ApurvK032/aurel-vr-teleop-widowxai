@@ -51,6 +51,28 @@ def test_transport_parses_webxr_xyzw_as_internal_wxyz() -> None:
     np.testing.assert_allclose(sample.head_quaternion_wxyz, [1, 0, 0, 0])
 
 
+def test_transport_prefers_session_locked_operator_heading() -> None:
+    sample = parse_pose_message(
+        {
+            "type": "pose",
+            "sequence": 9,
+            "capture_monotonic_ms": 10.0,
+            "capture_epoch_ms": 20.0,
+            "send_monotonic_ms": 10.1,
+            "left": {
+                "position": [0, 0, 0],
+                "orientation_xyzw": [0, 0, 0, 1],
+                "grip": 0,
+                "trigger": 0,
+            },
+            "head": {"orientation_xyzw": [0, 0.70710678, 0, 0.70710678]},
+            "operator_head": {"orientation_xyzw": [0, 0, 0, 1]},
+        }
+    )
+
+    np.testing.assert_allclose(sample.head_quaternion_wxyz, [1, 0, 0, 0])
+
+
 def test_watchdog_requires_fresh_window_and_times_out() -> None:
     base = parse_pose_message(
         {

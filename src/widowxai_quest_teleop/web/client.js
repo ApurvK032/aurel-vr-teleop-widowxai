@@ -22,6 +22,9 @@ let captured = 0;
 let sent = 0;
 let coalesced = 0;
 let leftInputSource = null;
+// Lock the operator's intended forward direction when passthrough starts.
+// Otherwise placing the headset down can rotate the task frame on re-clutch.
+let operatorHead = null;
 let wristOffset = JSON.parse(localStorage.getItem("widowxai.leftWristOffset") || "null");
 let calibrationArmed = wristOffset === null;
 let calibrationStartedAt = null;
@@ -178,6 +181,12 @@ function onXRFrame(frameTime, frame) {
   else gl.clearColor(0.025, 0.055, 0.10, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
+  const viewerPose = frame.getViewerPose(referenceSpace);
+  if (operatorHead === null && viewerPose) {
+    operatorHead = transformObject(viewerPose.transform);
+    setStatus("Operator forward locked; streaming", true);
+  }
+
   leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
   const rightInputSource = Array.from(session.inputSources).find((source) => source.handedness === "right" && source.gripSpace) || null;
   const controllerPose = leftInputSource ? frame.getPose(leftInputSource.gripSpace, referenceSpace) : null;
@@ -203,7 +212,6 @@ function onXRFrame(frameTime, frame) {
     }
     return;
   }
-  const viewerPose = frame.getViewerPose(referenceSpace);
   const nextPacket = {
     type: "pose",
     schema_version: 1,
@@ -218,6 +226,7 @@ function onXRFrame(frameTime, frame) {
       trigger: buttonValue(leftInputSource.gamepad, 0),
     },
     head: viewerPose ? transformObject(viewerPose.transform) : null,
+    operator_head: operatorHead,
   };
   if (latestPacket !== null) coalesced += 1;
   latestPacket = nextPacket;
@@ -231,6 +240,7 @@ function onXRFrame(frameTime, frame) {
 
 enterButton.addEventListener("click", async () => {
   try {
+    operatorHead = null;
     session = await navigator.xr.requestSession(sessionMode, { requiredFeatures: ["local-floor"] });
     gl = canvas.getContext("webgl", {
       xrCompatible: true,
@@ -246,6 +256,7 @@ enterButton.addEventListener("click", async () => {
     session.addEventListener("end", () => {
       session = null;
       latestPacket = null;
+      operatorHead = null;
       enterButton.disabled = false;
       exitButton.disabled = true;
       setStatus("Relay connected; VR stopped", true);
