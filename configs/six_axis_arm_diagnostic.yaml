@@ -20,7 +20,8 @@ ik:
 
 diagnostic:
   # Keep the 90 Hz Quest cadence but use the previously smooth legacy-driver
-  # horizon. Only this value differs from the failed 15 ms diagnostic.
+  # horizon. The diagnostic scheduler also forbids catch-up bursts: 90 Hz is
+  # a maximum command rate, never a queue of deadlines to replay after a stall.
   command_rate_hz: 90.0
   command_goal_time_s: 0.030
   # Representative of the 30%-scale teleoperation envelope: each test moves

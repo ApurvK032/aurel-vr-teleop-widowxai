@@ -275,6 +275,7 @@ def execute_plan(
     )
     feedback_q = plan.home_q.copy()
     started = time.perf_counter()
+    next_send_not_before_s = started
     current_motion = ""
 
     for tick, point in enumerate(plan.points):
@@ -286,8 +287,12 @@ def execute_plan(
                 f"{motion.label} ({motion.positive_label}, then {motion.negative_label})"
             )
 
+        if pace_realtime:
+            sleep_for = next_send_not_before_s - time.perf_counter()
+            if sleep_for > 0.0:
+                time.sleep(sleep_for)
         loop_start_ns = time.perf_counter_ns()
-        late_by = loop_start_ns / 1e9 - (started + tick * period)
+        late_by = max(0.0, loop_start_ns / 1e9 - next_send_not_before_s)
         if pace_realtime:
             if late_by > float(diagnostic["maximum_loop_overrun_s"]):
                 raise HardwareSafetyError(
@@ -303,6 +308,11 @@ def execute_plan(
         )
         send_ns = time.perf_counter_ns()
         send_duration_ms = (send_ns - send_start_ns) / 1e6
+        if pace_realtime:
+            # Pace from the last successfully delivered command, not from an
+            # absolute timeline. A blocking driver/feedback call can therefore
+            # create one long interval, but never a catch-up burst afterward.
+            next_send_not_before_s = send_ns / 1e9 + period
         feedback_fresh = False
         feedback_error: float | str = ""
         feedback_duration_ms: float | str = ""
@@ -326,6 +336,7 @@ def execute_plan(
             "motion_label": point.motion_label,
             "phase": point.phase,
             "planned_elapsed_s": tick * period,
+            "actual_elapsed_s": send_ns / 1e9 - started,
             "realtime_paced": pace_realtime,
             "schedule_lateness_ms": late_by * 1000.0,
             "command_send_monotonic_ns": send_ns,
@@ -337,11 +348,6 @@ def execute_plan(
         row.update({f"q_cmd_{joint}": point.q_command[joint] for joint in range(6)})
         row.update({f"q_feedback_{joint}": feedback_q[joint] for joint in range(6)})
         rows.append(row)
-
-        if pace_realtime:
-            sleep_for = started + (tick + 1) * period - time.perf_counter()
-            if sleep_for > 0.0:
-                time.sleep(sleep_for)
 
     return rows
 

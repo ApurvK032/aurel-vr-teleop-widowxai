@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import scripts.run_six_axis_diagnostic as diagnostic_runner
 from scripts.run_six_axis_diagnostic import execute_plan
 from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
@@ -153,3 +154,87 @@ def test_partial_diagnostic_rows_survive_a_driver_exception() -> None:
     assert rows[0]["tick"] == 0
     assert float(rows[0]["send_call_duration_ms"]) >= 0.0
     assert float(rows[0]["feedback_call_duration_ms"]) >= 0.0
+
+
+def test_realtime_scheduler_never_catches_up_after_a_slow_send(monkeypatch) -> None:
+    class FakeClock:
+        def __init__(self):
+            self.now = 100.0
+
+        def perf_counter(self):
+            return self.now
+
+        def perf_counter_ns(self):
+            return round(self.now * 1e9)
+
+        def sleep(self, duration):
+            assert duration >= 0.0
+            self.now += duration
+
+    clock = FakeClock()
+    monkeypatch.setattr(diagnostic_runner.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(diagnostic_runner.time, "perf_counter_ns", clock.perf_counter_ns)
+    monkeypatch.setattr(diagnostic_runner.time, "sleep", clock.sleep)
+
+    limits = np.vstack([np.tile([-1.0, 1.0], (6, 1)), [0.0, 0.04]])
+    state = HardwareState(np.zeros(6), 0.02, limits, "dry-run")
+    motion = DIAGNOSTIC_MOTIONS[0]
+    plan = DiagnosticPlan(
+        np.zeros(6),
+        tuple(
+            DiagnosticPoint(
+                motion.key,
+                motion.label,
+                f"point {index}",
+                np.full(6, index * 0.001),
+            )
+            for index in range(3)
+        ),
+        (),
+        90.0,
+    )
+    gate = CommandGate(
+        np.zeros(6),
+        0.02,
+        limits,
+        np.full(6, 0.01),
+        joint_limit_margin_rad=0.0,
+        gripper_limits_m=(0.0, 0.04),
+        max_gripper_delta_m=0.01,
+    )
+
+    class SlowBackend:
+        def __init__(self):
+            self.calls = 0
+
+        def send_positions(self, _q, _gripper, *, include_gripper):
+            assert include_gripper is False
+            clock.now += (0.001, 0.030, 0.001)[self.calls]
+            self.calls += 1
+
+        def read_state(self):
+            return state
+
+    rows: list[dict[str, object]] = []
+    execute_plan(
+        SlowBackend(),
+        gate,
+        plan,
+        {
+            "diagnostic": {
+                "feedback_rate_hz": 1.0,
+                "maximum_loop_overrun_s": 0.05,
+                "maximum_tracking_error_rad": 0.08,
+            }
+        },
+        0.02,
+        rows,
+        pace_realtime=True,
+    )
+
+    send_times = np.asarray(
+        [float(row["command_send_monotonic_ns"]) / 1e9 for row in rows]
+    )
+    assert len(rows) == 3
+    assert np.all(np.diff(send_times) >= 1.0 / plan.rate_hz - 1e-9)
+    assert np.diff(send_times)[1] >= 1.0 / plan.rate_hz
