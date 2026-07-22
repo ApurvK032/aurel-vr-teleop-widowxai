@@ -16,6 +16,32 @@ def bounded_command_period(elapsed_s: float, loop_rate_hz: float) -> float:
     return max(1e-6, min(elapsed, 1.0 / rate))
 
 
+def configured_minimum_command_interval(control: dict) -> float:
+    """Return an optional latest-state command spacing guard."""
+
+    interval = float(control.get("minimum_command_interval_s", 0.0))
+    if not np.isfinite(interval) or interval < 0.0:
+        raise ValueError("minimum command interval must be finite and nonnegative")
+    return interval
+
+
+def minimum_command_spacing_wait(
+    last_send_s: float,
+    minimum_interval_s: float,
+    now_s: float,
+) -> float:
+    """Delay until one spacing interval has elapsed; never repay missed time."""
+
+    last_send = float(last_send_s)
+    interval = float(minimum_interval_s)
+    now = float(now_s)
+    if not np.isfinite(last_send) or not np.isfinite(now):
+        raise ValueError("command timestamps must be finite")
+    if not np.isfinite(interval) or interval < 0.0:
+        raise ValueError("minimum command interval must be finite and nonnegative")
+    return max(0.0, last_send + interval - now)
+
+
 def _jerk_safe_acceleration(
     candidate: float,
     velocity: float,

@@ -21,7 +21,12 @@ from widowxai_quest_teleop.hardware import (
 )
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.motion_limiter import bounded_command_period, limiter_from_config
+from widowxai_quest_teleop.motion_limiter import (
+    bounded_command_period,
+    configured_minimum_command_interval,
+    limiter_from_config,
+    minimum_command_spacing_wait,
+)
 from widowxai_quest_teleop.pose_filter import ControllerPoseFilter, pose_filter_alphas
 from widowxai_quest_teleop.safety import FreshSequenceWatchdog, TimeAlignedCommandHistory
 from widowxai_quest_teleop.telemetry import TelemetryLogger
@@ -59,6 +64,7 @@ def validate_hardware_config(config: dict) -> None:
             raise HardwareSafetyError(f"{name} must be finite and positive")
 
     nonnegative_values = {
+        "control.minimum_command_interval_s": control.get("minimum_command_interval_s", 0.0),
         "hardware.command_goal_time_s": hardware["command_goal_time_s"],
         "hardware.feedback_tracking_delay_s": hardware.get("feedback_tracking_delay_s", 0.0),
         "hardware.joint_limit_margin_rad": hardware["joint_limit_margin_rad"],
@@ -67,6 +73,15 @@ def validate_hardware_config(config: dict) -> None:
         value = float(raw)
         if not np.isfinite(value) or value < 0.0:
             raise HardwareSafetyError(f"{name} must be finite and nonnegative")
+    minimum_command_interval = float(control.get("minimum_command_interval_s", 0.0))
+    if minimum_command_interval > 0.0 and update_mode != "quest_synchronized":
+        raise HardwareSafetyError(
+            "control.minimum_command_interval_s requires quest_synchronized updates"
+        )
+    if minimum_command_interval >= float(quest["stale_timeout_s"]):
+        raise HardwareSafetyError(
+            "control.minimum_command_interval_s must be shorter than the stale timeout"
+        )
 
     max_delta = np.asarray(config["ik"]["max_dq_per_joint_rad"], dtype=float).reshape(6)
     if not np.all(np.isfinite(max_delta)) or np.any(max_delta <= 0.0):
@@ -434,13 +449,14 @@ def main() -> None:
 
     config = load_config(args.config)
     hardware = config["hardware"]
+    control = config["control"]
     if not hardware.get("enabled") or not hardware.get("require_explicit_enable"):
         raise SystemExit("hardware demo configuration is not explicitly gated")
     try:
         validate_hardware_config(config)
     except (KeyError, TypeError, ValueError, HardwareSafetyError) as exc:
         raise SystemExit(f"invalid hardware safety configuration: {exc}") from None
-    controller_filter = ControllerPoseFilter(config["control"])
+    controller_filter = ControllerPoseFilter(control)
     if not np.isfinite(args.duration):
         raise SystemExit("--duration must be finite")
 
@@ -577,12 +593,12 @@ def main() -> None:
         q_des = q_command.copy()
         gripper_des = gripper_command
         joint_limiter = limiter_from_config(
-            config["control"].get("joint_command_limits"),
+            control.get("joint_command_limits"),
             q_command,
         )
         gripper_limiter = (
             limiter_from_config(
-                config["control"].get("gripper_command_limits"),
+                control.get("gripper_command_limits"),
                 np.array([gripper_command]),
             )
             if control_gripper
@@ -595,10 +611,11 @@ def main() -> None:
         target_pose = None
         diagnostics = None
 
-        loop_hz = float(config["control"]["loop_rate_hz"])
+        loop_hz = float(control["loop_rate_hz"])
         period = 1.0 / loop_hz
-        update_mode = config["control"].get("update_mode", "fixed_rate")
+        update_mode = control.get("update_mode", "fixed_rate")
         quest_synchronized = update_mode == "quest_synchronized"
+        minimum_command_interval_s = configured_minimum_command_interval(control)
         feedback_stride = max(1, round(loop_hz / float(hardware["feedback_check_rate_hz"])))
         feedback_period = 1.0 / float(hardware["feedback_check_rate_hz"])
         duration_limit = float(hardware["max_demo_duration_s"])
@@ -635,7 +652,23 @@ def main() -> None:
         )
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
             while time.perf_counter() - started < duration:
+                command_spacing_wait_s = 0.0
                 if quest_synchronized:
+                    command_spacing_wait_s = minimum_command_spacing_wait(
+                        last_command_send_s,
+                        minimum_command_interval_s,
+                        time.perf_counter(),
+                    )
+                    remaining_s = duration - (time.perf_counter() - started)
+                    if command_spacing_wait_s >= remaining_s:
+                        if remaining_s > 0.0:
+                            time.sleep(remaining_s)
+                        break
+                    if command_spacing_wait_s > 0.0:
+                        # Do not consume a queued frame until the physical send
+                        # slot opens. The capacity-one mailbox keeps only the
+                        # newest pose received during this wait.
+                        time.sleep(command_spacing_wait_s)
                     remaining_s = duration - (time.perf_counter() - started)
                     if remaining_s <= 0.0:
                         break
@@ -797,6 +830,8 @@ def main() -> None:
                     command_send_epoch_ns=command_send_epoch_ns,
                     feedback_read_monotonic_ns=feedback_read_ns,
                     feedback_sample_fresh=feedback_sample_fresh,
+                    command_spacing_wait_ms=command_spacing_wait_s * 1000.0,
+                    mailbox_overwrite_count=receiver.mailbox.overwrite_count,
                     reconnect_generation="" if last_sample is None else last_sample.reconnect_generation,
                     quest_grip="" if last_sample is None else last_sample.grip,
                     quest_trigger="" if last_sample is None else last_sample.trigger,

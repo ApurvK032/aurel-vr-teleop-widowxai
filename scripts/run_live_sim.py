@@ -12,7 +12,12 @@ from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.gripper import trigger_to_gripper_position
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.motion_limiter import bounded_command_period, limiter_from_config
+from widowxai_quest_teleop.motion_limiter import (
+    bounded_command_period,
+    configured_minimum_command_interval,
+    limiter_from_config,
+    minimum_command_spacing_wait,
+)
 from widowxai_quest_teleop.pose_filter import ControllerPoseFilter
 from widowxai_quest_teleop.safety import FreshSequenceWatchdog
 from widowxai_quest_teleop.telemetry import TelemetryLogger
@@ -69,6 +74,12 @@ def main() -> None:
     if update_mode not in ("fixed_rate", "quest_synchronized"):
         raise SystemExit(f"unknown control.update_mode: {update_mode}")
     quest_synchronized = update_mode == "quest_synchronized"
+    try:
+        minimum_command_interval_s = configured_minimum_command_interval(config["control"])
+    except ValueError as exc:
+        raise SystemExit(f"invalid command spacing: {exc}") from None
+    if minimum_command_interval_s > 0.0 and not quest_synchronized:
+        raise SystemExit("minimum command spacing requires quest_synchronized updates")
     controller_filter = ControllerPoseFilter(config["control"])
     joint_limiter = limiter_from_config(
         config["control"].get("joint_command_limits"),
@@ -93,7 +104,15 @@ def main() -> None:
     try:
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
             while args.duration <= 0.0 or time.perf_counter() - started < args.duration:
+                command_spacing_wait_s = 0.0
                 if quest_synchronized:
+                    command_spacing_wait_s = minimum_command_spacing_wait(
+                        last_command_send_s,
+                        minimum_command_interval_s,
+                        time.perf_counter(),
+                    )
+                    if command_spacing_wait_s > 0.0:
+                        time.sleep(command_spacing_wait_s)
                     sample, mailbox_generation = receiver.mailbox.wait_take_latest(
                         mailbox_generation,
                         dt,
@@ -211,6 +230,8 @@ def main() -> None:
                     ik_start_monotonic_ns=ik_start,
                     ik_end_monotonic_ns=ik_end,
                     command_send_monotonic_ns=command_send_ns,
+                    command_spacing_wait_ms=command_spacing_wait_s * 1000.0,
+                    mailbox_overwrite_count=receiver.mailbox.overwrite_count,
                     reconnect_generation="" if last_sample is None else last_sample.reconnect_generation,
                     quest_grip="" if last_sample is None else last_sample.grip,
                     quest_trigger="" if last_sample is None else last_sample.trigger,

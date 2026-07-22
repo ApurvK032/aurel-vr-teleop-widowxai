@@ -1,14 +1,36 @@
 import numpy as np
+import pytest
 
 from widowxai_quest_teleop.motion_limiter import (
     AccelerationLimitedCommand,
     bounded_command_period,
+    configured_minimum_command_interval,
+    minimum_command_spacing_wait,
 )
 
 
 def test_command_period_caps_late_frames_without_stretching_early_frames() -> None:
     assert bounded_command_period(0.006, 90.0) == 0.006
     assert bounded_command_period(0.020, 90.0) == 1.0 / 90.0
+
+
+def test_minimum_command_spacing_never_repays_a_late_interval() -> None:
+    interval = 1.0 / 90.0
+    assert minimum_command_spacing_wait(10.0, interval, 10.005) == pytest.approx(
+        interval - 0.005
+    )
+    assert minimum_command_spacing_wait(10.0, interval, 10.050) == 0.0
+    assert configured_minimum_command_interval({}) == 0.0
+    assert configured_minimum_command_interval(
+        {"minimum_command_interval_s": interval}
+    ) == pytest.approx(interval)
+
+
+def test_minimum_command_spacing_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="nonnegative"):
+        configured_minimum_command_interval({"minimum_command_interval_s": -0.1})
+    with pytest.raises(ValueError, match="nonnegative"):
+        minimum_command_spacing_wait(1.0, np.nan, 1.0)
 
 
 def test_limiter_respects_velocity_and_acceleration_bounds() -> None:

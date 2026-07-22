@@ -29,6 +29,8 @@ TELEMETRY_COLUMNS = [
     "command_send_epoch_ns",
     "feedback_read_monotonic_ns",
     "feedback_sample_fresh",
+    "command_spacing_wait_ms",
+    "mailbox_overwrite_count",
     "reconnect_generation",
     "quest_grip",
     "quest_trigger",

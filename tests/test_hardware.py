@@ -568,6 +568,46 @@ def test_calibrated_adaptive_hardware_profile_preserves_fast_timing_and_loose_gu
     assert config["control"]["gripper_command_limits"]["max_velocity"] == [0.120]
 
 
+def test_no_catchup_profiles_change_only_cadence_and_driver_horizon() -> None:
+    baseline_hardware = load_config("configs/calibrated_adaptive_30pct_hardware.yaml")
+    hardware = load_config("configs/no_catchup_30pct_hardware.yaml")
+    baseline_sim = load_config("configs/calibrated_adaptive_30pct_mujoco.yaml")
+    simulation = load_config("configs/no_catchup_30pct_mujoco.yaml")
+
+    validate_hardware_config(hardware)
+    validate_live_hardware_timing(hardware)
+    assert hardware["control"]["minimum_command_interval_s"] == pytest.approx(1.0 / 90.0)
+    assert simulation["control"]["minimum_command_interval_s"] == pytest.approx(1.0 / 90.0)
+    assert hardware["hardware"]["command_goal_time_s"] == pytest.approx(0.030)
+
+    hardware_control = dict(hardware["control"])
+    simulation_control = dict(simulation["control"])
+    hardware_control.pop("minimum_command_interval_s")
+    simulation_control.pop("minimum_command_interval_s")
+    assert hardware_control == baseline_hardware["control"]
+    assert simulation_control == baseline_sim["control"]
+    assert hardware["quest"] == baseline_hardware["quest"]
+    assert simulation["quest"] == baseline_sim["quest"]
+
+
+def test_hardware_config_rejects_incompatible_minimum_command_spacing() -> None:
+    config = load_config("configs/smooth_30pct_full_gripper.yaml")
+    config["control"]["minimum_command_interval_s"] = np.nan
+    with pytest.raises(HardwareSafetyError, match="minimum_command_interval_s"):
+        validate_hardware_config(config)
+
+    config = load_config("configs/smooth_30pct_full_gripper.yaml")
+    config["control"]["update_mode"] = "fixed_rate"
+    config["control"]["minimum_command_interval_s"] = 1.0 / 90.0
+    with pytest.raises(HardwareSafetyError, match="quest_synchronized"):
+        validate_hardware_config(config)
+
+    config = load_config("configs/smooth_30pct_full_gripper.yaml")
+    config["control"]["minimum_command_interval_s"] = config["quest"]["stale_timeout_s"]
+    with pytest.raises(HardwareSafetyError, match="stale timeout"):
+        validate_hardware_config(config)
+
+
 def test_hardware_config_rejects_unknown_update_mode_and_bad_jerk() -> None:
     config = load_config("configs/smooth_30pct_full_gripper.yaml")
     config["control"]["update_mode"] = "timer_guess"
