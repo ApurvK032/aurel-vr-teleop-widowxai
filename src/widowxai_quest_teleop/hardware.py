@@ -103,6 +103,7 @@ class HardwareBackend(Protocol):
         gripper_position_m: float,
         *,
         include_gripper: bool = True,
+        arm_feedforward_velocity: np.ndarray | None = None,
     ) -> None: ...
     def move_to_rest(
         self,
@@ -210,10 +211,15 @@ class DryRunBackend:
         gripper_position_m: float,
         *,
         include_gripper: bool = True,
+        arm_feedforward_velocity: np.ndarray | None = None,
     ) -> None:
         if not self.enabled:
             raise HardwareSafetyError("dry-run position control is not enabled")
         self.q_arm = np.asarray(q_command, dtype=float).reshape(6).copy()
+        if arm_feedforward_velocity is not None:
+            velocity = np.asarray(arm_feedforward_velocity, dtype=float).reshape(6)
+            if not np.all(np.isfinite(velocity)):
+                raise HardwareSafetyError("dry-run feedforward velocity is non-finite")
         if include_gripper:
             self.gripper = float(gripper_position_m)
         self.commands += 1
@@ -444,11 +450,23 @@ class TrossenArmBackend:
         gripper_position_m: float,
         *,
         include_gripper: bool = True,
+        arm_feedforward_velocity: np.ndarray | None = None,
     ) -> None:
         if self._driver is None or not self._enabled:
             raise HardwareSafetyError("position control is not enabled")
         q = np.asarray(q_command, dtype=float).reshape(6)
-        self._driver.set_arm_positions(q, self._command_goal_time_s, False)
+        if arm_feedforward_velocity is None:
+            self._driver.set_arm_positions(q, self._command_goal_time_s, False)
+        else:
+            feedforward = np.asarray(arm_feedforward_velocity, dtype=float).reshape(6)
+            if not np.all(np.isfinite(feedforward)):
+                raise HardwareSafetyError("arm feedforward velocity is non-finite")
+            self._driver.set_arm_positions(
+                q,
+                self._command_goal_time_s,
+                False,
+                feedforward,
+            )
         if include_gripper:
             if not self._gripper_enabled:
                 raise HardwareSafetyError("gripper position control is not enabled")

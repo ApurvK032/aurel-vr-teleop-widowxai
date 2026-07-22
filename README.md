@@ -70,6 +70,14 @@ http://localhost:8443/
 
 Select **Enter Passthrough** when available; the page falls back to a dark-blue VR tracking space if the browser does not expose WebXR passthrough. On first use, squeeze both grip buttons and rotate both hands for five seconds while keeping the anatomical wrists still. The browser estimates and stores the left controller's wrist-pivot offset. During normal use, left grip is the clutch and left trigger controls the simulated gripper.
 
+On Ubuntu, start or restart the relay with `./scripts/restart_localhost.sh`. In
+addition to restoring USB reverse forwarding, it forces Horizon OS's virtual
+proximity state to mounted and verifies that the override was accepted. After
+you enter passthrough once, the headset can remain on the table for repeated
+MuJoCo or arm runs. The override is cleared by a headset reboot, so run the
+script again after every reboot. Valid controller tracking is still required;
+the teleoperation freshness watchdog and left-grip deadman are not bypassed.
+
 Terminal 3—start the 200 Hz IK process, which publishes `ik_state` through the relay:
 
 ```powershell

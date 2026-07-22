@@ -51,6 +51,7 @@ TELEMETRY_COLUMNS = [
     "wrist_current_position",
     "q_des",
     "q_cmd",
+    "q_feedforward_velocity",
     "q_feedback",
     "q_feedback_reference",
     "q_feedback_error",

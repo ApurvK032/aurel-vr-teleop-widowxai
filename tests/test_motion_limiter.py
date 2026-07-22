@@ -3,11 +3,37 @@ import pytest
 
 from widowxai_quest_teleop.motion_limiter import (
     AccelerationLimitedCommand,
+    VelocityFeedforwardFilter,
     bounded_command_period,
     configured_command_spacing_stage,
     configured_minimum_command_interval,
     minimum_command_spacing_wait,
 )
+
+
+def test_velocity_feedforward_is_filtered_gained_and_capped() -> None:
+    estimator = VelocityFeedforwardFilter(
+        np.zeros(2),
+        filter_alpha=0.5,
+        gain=0.5,
+        max_velocity=np.array([0.3, 2.0]),
+    )
+
+    np.testing.assert_allclose(estimator.update(np.array([0.01, 0.01]), 0.01), [0.25, 0.25])
+    np.testing.assert_allclose(estimator.update(np.array([0.02, 0.02]), 0.01), [0.3, 0.375])
+
+
+def test_velocity_feedforward_drops_old_direction_on_reversal_and_reset() -> None:
+    estimator = VelocityFeedforwardFilter(
+        np.zeros(1),
+        filter_alpha=0.5,
+        gain=0.5,
+        max_velocity=np.ones(1),
+    )
+    assert estimator.update(np.array([0.01]), 0.01)[0] > 0.0
+    assert estimator.update(np.array([0.0]), 0.01)[0] < 0.0
+    estimator.reset(np.array([0.2]))
+    np.testing.assert_array_equal(estimator.update(np.array([0.2]), 0.01), [0.0])
 
 
 def test_command_period_caps_late_frames_without_stretching_early_frames() -> None:

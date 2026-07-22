@@ -40,14 +40,26 @@ adb reverse --remove tcp:8443 >/dev/null 2>&1 || true
 adb reverse tcp:8443 tcp:8443 >/dev/null
 
 # Keep development passthrough/WebXR alive while the headset is off the face.
-# Horizon OS clears the proximity override on reboot, so reapply it whenever
-# the relay is restarted. The stay-on mask covers USB or AC-powered hubs.
-adb shell taskset 0000000F am broadcast \
+# Horizon OS clears the virtual proximity override on reboot. Reset any stale
+# automation state first, then force the virtual sensor to CLOSE (mounted).
+# The stay-on mask covers USB or AC-powered hubs.
+adb shell am broadcast \
+  -a com.oculus.vrpowermanager.automation_disable >/dev/null
+adb shell am broadcast \
   -a com.oculus.vrpowermanager.prox_close >/dev/null
 adb shell svc power stayon true
 adb shell input keyevent KEYCODE_WAKEUP
 
+quest_power_state=$(adb shell dumpsys vrpowermanager 2>/dev/null | tr -d '\r')
+if ! grep -Fqx 'Virtual proximity state: CLOSE' <<<"$quest_power_state" || \
+   ! grep -Fqx 'State: HEADSET_MOUNTED' <<<"$quest_power_state"; then
+  echo "ERROR: Quest did not accept the persistent mounted-state override." >&2
+  echo "Reconnect ADB, restart the headset if necessary, and try again." >&2
+  exit 1
+fi
+
 echo "Quest relay: http://localhost:8443"
-echo "Quest proximity sleep disabled until the next headset reboot."
+echo "Quest virtual proximity: mounted until the next headset reboot."
+echo "Enter passthrough once; it can then remain on the table across arm runs."
 echo "Press Ctrl+C to stop it."
 exec env -u PYTHONPATH .venv/bin/widowxai-quest-relay --host 0.0.0.0 --port 8443

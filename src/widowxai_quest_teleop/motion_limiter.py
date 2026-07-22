@@ -231,6 +231,67 @@ class AccelerationLimitedCommand:
         )
 
 
+class VelocityFeedforwardFilter:
+    """Estimate a bounded, smoothed endpoint velocity from position commands."""
+
+    def __init__(
+        self,
+        initial_position: np.ndarray,
+        *,
+        filter_alpha: float,
+        gain: float,
+        max_velocity: np.ndarray,
+    ) -> None:
+        initial = np.asarray(initial_position, dtype=float).reshape(-1)
+        velocity = np.asarray(max_velocity, dtype=float).reshape(initial.shape)
+        alpha = float(filter_alpha)
+        feedforward_gain = float(gain)
+        if not np.all(np.isfinite(initial)):
+            raise ValueError("feedforward initial position must be finite")
+        if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+            raise ValueError("feedforward filter alpha must be within (0, 1]")
+        if not np.isfinite(feedforward_gain) or not 0.0 <= feedforward_gain <= 1.0:
+            raise ValueError("feedforward gain must be within [0, 1]")
+        if not np.all(np.isfinite(velocity)) or np.any(velocity <= 0.0):
+            raise ValueError("feedforward velocity caps must be finite and positive")
+        self.filter_alpha = alpha
+        self.gain = feedforward_gain
+        self.max_velocity = velocity.copy()
+        self.previous_position = initial.copy()
+        self.filtered_velocity = np.zeros_like(initial)
+
+    def reset(self, position: np.ndarray) -> None:
+        value = np.asarray(position, dtype=float).reshape(self.previous_position.shape)
+        if not np.all(np.isfinite(value)):
+            raise ValueError("feedforward reset position must be finite")
+        self.previous_position = value.copy()
+        self.filtered_velocity.fill(0.0)
+
+    def update(self, position: np.ndarray, dt: float) -> np.ndarray:
+        value = np.asarray(position, dtype=float).reshape(self.previous_position.shape)
+        period = float(dt)
+        if not np.all(np.isfinite(value)):
+            raise ValueError("feedforward position must be finite")
+        if not np.isfinite(period) or period <= 0.0:
+            raise ValueError("feedforward period must be finite and positive")
+        raw_velocity = (value - self.previous_position) / period
+        # Do not carry an old velocity through a direction reversal. A stale
+        # opposite-sign endpoint velocity would be worse than no feedforward
+        # while the driver replans the new segment.
+        reversing = raw_velocity * self.filtered_velocity < 0.0
+        self.filtered_velocity[reversing] = 0.0
+        self.filtered_velocity = (
+            (1.0 - self.filter_alpha) * self.filtered_velocity
+            + self.filter_alpha * raw_velocity
+        )
+        self.previous_position = value.copy()
+        return np.clip(
+            self.gain * self.filtered_velocity,
+            -self.max_velocity,
+            self.max_velocity,
+        )
+
+
 def limiter_from_config(
     section: dict | None,
     initial_position: np.ndarray,

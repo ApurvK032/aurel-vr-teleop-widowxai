@@ -620,6 +620,62 @@ def test_send_barrier_profiles_change_only_command_spacing_policy() -> None:
         assert simulation[section] == baseline_sim[section]
 
 
+def test_step2_profile_changes_only_driver_horizon_from_milestone_3_step1() -> None:
+    step1 = load_config("configs/send_barrier_30pct_hardware.yaml")
+    step2 = load_config("configs/step2_25ms_30pct_hardware.yaml")
+
+    validate_hardware_config(step2)
+    validate_live_hardware_timing(step2)
+    assert step1["hardware"]["command_goal_time_s"] == pytest.approx(0.030)
+    assert step2["hardware"]["command_goal_time_s"] == pytest.approx(0.025)
+
+    step1_hardware = dict(step1["hardware"])
+    step2_hardware = dict(step2["hardware"])
+    step1_hardware.pop("command_goal_time_s")
+    step2_hardware.pop("command_goal_time_s")
+    assert step2_hardware == step1_hardware
+    for section in ("model", "quest", "control", "ik", "telemetry"):
+        assert step2[section] == step1[section]
+
+
+def test_step3_profile_adds_feedforward_and_tabletop_preflight_to_step2() -> None:
+    step2 = load_config("configs/step2_25ms_30pct_hardware.yaml")
+    step3 = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
+
+    validate_hardware_config(step3)
+    validate_live_hardware_timing(step3)
+    feedforward = step3["hardware"]["arm_velocity_feedforward"]
+    assert feedforward == {
+        "enabled": True,
+        "filter_alpha": 0.5,
+        "gain": 0.5,
+        "max_velocity_rad_s": [1.5, 1.25, 2.75, 2.0, 2.5, 3.0],
+    }
+
+    step3_hardware = dict(step3["hardware"])
+    step3_hardware.pop("arm_velocity_feedforward")
+    assert step3_hardware == step2["hardware"]
+    step3_quest = dict(step3["quest"])
+    assert step3_quest.pop("prepare_tabletop_tracking_via_adb") is True
+    assert step3_quest == step2["quest"]
+    for section in ("model", "control", "ik", "telemetry"):
+        assert step3[section] == step2[section]
+
+
+def test_feedforward_config_rejects_caps_above_joint_command_caps() -> None:
+    config = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
+    config["hardware"]["arm_velocity_feedforward"]["max_velocity_rad_s"][0] = 5.5
+    with pytest.raises(HardwareSafetyError, match="must not exceed"):
+        validate_hardware_config(config)
+
+
+def test_hardware_config_rejects_nonboolean_tabletop_preflight() -> None:
+    config = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
+    config["quest"]["prepare_tabletop_tracking_via_adb"] = "yes"
+    with pytest.raises(HardwareSafetyError, match="must be a boolean"):
+        validate_hardware_config(config)
+
+
 def test_hardware_config_rejects_incompatible_minimum_command_spacing() -> None:
     config = load_config("configs/smooth_30pct_full_gripper.yaml")
     config["control"]["minimum_command_interval_s"] = np.nan
@@ -769,9 +825,22 @@ def test_official_backend_uses_configured_nonblocking_driver_calls() -> None:
         def set_gripper_mode(self, mode):
             self.calls.append(("gripper_mode", mode))
 
-        def set_arm_positions(self, positions, goal_time, blocking):
+        def set_arm_positions(
+            self,
+            positions,
+            goal_time,
+            blocking,
+            feedforward_velocity=None,
+        ):
             self.positions[:6] = np.asarray(positions, dtype=float)
-            self.calls.append(("arm_positions", self.positions[:6].copy(), goal_time, blocking))
+            feedforward = (
+                None
+                if feedforward_velocity is None
+                else np.asarray(feedforward_velocity, dtype=float).copy()
+            )
+            self.calls.append(
+                ("arm_positions", self.positions[:6].copy(), goal_time, blocking, feedforward)
+            )
 
         def set_gripper_position(self, position, goal_time, blocking):
             self.positions[6] = float(position)
@@ -802,7 +871,17 @@ def test_official_backend_uses_configured_nonblocking_driver_calls() -> None:
     arm_call, gripper_call = FakeDriver.instance.calls[-2:]
     assert arm_call[0] == "arm_positions"
     np.testing.assert_array_equal(arm_call[1], q)
-    assert arm_call[2:] == (0.03, False)
+    assert arm_call[2:4] == (0.03, False)
+    assert arm_call[4] is None
+    assert gripper_call == ("gripper_position", 0.04, 0.03, False)
+    feedforward = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    backend.send_positions(
+        q,
+        0.04,
+        arm_feedforward_velocity=feedforward,
+    )
+    arm_call, gripper_call = FakeDriver.instance.calls[-2:]
+    np.testing.assert_array_equal(arm_call[4], feedforward)
     assert gripper_call == ("gripper_position", 0.04, 0.03, False)
     backend.move_gripper_blocking(0.04, duration_s=2.0)
     assert FakeDriver.instance.calls[-2][0] == "gripper_mode"
@@ -811,7 +890,8 @@ def test_official_backend_uses_configured_nonblocking_driver_calls() -> None:
     arm_call, gripper_call = FakeDriver.instance.calls[-3], FakeDriver.instance.calls[-1]
     assert arm_call[0] == "arm_positions"
     np.testing.assert_array_equal(arm_call[1], np.zeros(6))
-    assert arm_call[2:] == (2.0, True)
+    assert arm_call[2:4] == (2.0, True)
+    assert arm_call[4] is None
     assert gripper_call == ("gripper_position", 0.0, 2.0, True)
     position_call_count = sum(
         item[0] in ("arm_positions", "gripper_position")

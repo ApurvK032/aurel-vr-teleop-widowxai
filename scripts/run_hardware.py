@@ -22,6 +22,7 @@ from widowxai_quest_teleop.hardware import (
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
 from widowxai_quest_teleop.motion_limiter import (
+    VelocityFeedforwardFilter,
     bounded_command_period,
     configured_command_spacing_stage,
     configured_minimum_command_interval,
@@ -29,6 +30,7 @@ from widowxai_quest_teleop.motion_limiter import (
     minimum_command_spacing_wait,
 )
 from widowxai_quest_teleop.pose_filter import ControllerPoseFilter, pose_filter_alphas
+from widowxai_quest_teleop.quest_power import prepare_tabletop_tracking
 from widowxai_quest_teleop.safety import FreshSequenceWatchdog, TimeAlignedCommandHistory
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 from widowxai_quest_teleop.transport import QuestReceiver
@@ -43,6 +45,11 @@ def validate_hardware_config(config: dict) -> None:
     update_mode = control.get("update_mode", "fixed_rate")
     if update_mode not in ("fixed_rate", "quest_synchronized"):
         raise HardwareSafetyError(f"unknown control.update_mode: {update_mode}")
+    tabletop_tracking = quest.get("prepare_tabletop_tracking_via_adb", False)
+    if not isinstance(tabletop_tracking, bool):
+        raise HardwareSafetyError(
+            "quest.prepare_tabletop_tracking_via_adb must be a boolean"
+        )
 
     positive_values = {
         "control.loop_rate_hz": control["loop_rate_hz"],
@@ -128,6 +135,35 @@ def validate_hardware_config(config: dict) -> None:
                 raise HardwareSafetyError("gripper command jerk must be finite and positive")
         if gripper_velocity[0] / float(control["loop_rate_hz"]) > float(hardware["max_gripper_delta_m"]) + 1e-12:
             raise HardwareSafetyError("gripper velocity limit exceeds the configured per-tick command cap")
+
+    feedforward = hardware.get("arm_velocity_feedforward", {})
+    if feedforward is None:
+        feedforward = {}
+    if not isinstance(feedforward, dict):
+        raise HardwareSafetyError("hardware.arm_velocity_feedforward must be a mapping")
+    feedforward_enabled = feedforward.get("enabled", False)
+    if not isinstance(feedforward_enabled, bool):
+        raise HardwareSafetyError("hardware.arm_velocity_feedforward.enabled must be a boolean")
+    if feedforward_enabled:
+        try:
+            feedforward_filter = VelocityFeedforwardFilter(
+                np.zeros(6),
+                filter_alpha=feedforward["filter_alpha"],
+                gain=feedforward["gain"],
+                max_velocity=np.asarray(feedforward["max_velocity_rad_s"], dtype=float),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HardwareSafetyError(f"invalid arm velocity feedforward: {exc}") from None
+        joint_limits = control.get("joint_command_limits", {}) or {}
+        if joint_limits.get("enabled", False):
+            joint_velocity_caps = np.asarray(
+                joint_limits["max_velocity"],
+                dtype=float,
+            ).reshape(6)
+            if np.any(feedforward_filter.max_velocity > joint_velocity_caps):
+                raise HardwareSafetyError(
+                    "arm velocity feedforward caps must not exceed the joint command velocity caps"
+                )
 
     gripper_min = float(hardware["gripper_min_demo_m"])
     gripper_open = float(hardware["gripper_open_m"])
@@ -521,11 +557,17 @@ def main() -> None:
     clutch = ClutchController(mapper)
     watchdog = FreshSequenceWatchdog(quest["stale_timeout_s"], quest["fresh_samples_to_recover"])
     receiver = QuestReceiver(quest["websocket_url"])
-    receiver.start()
 
     connected = False
     motion_started = False
     try:
+        if quest.get("prepare_tabletop_tracking_via_adb", False):
+            print("preflight: waking Quest tabletop tracking through ADB")
+            try:
+                prepare_tabletop_tracking()
+            except RuntimeError as exc:
+                raise HardwareSafetyError(str(exc)) from None
+        receiver.start()
         print("preflight: waiting for fresh Quest tracking with grip released")
         wait_for_released_quest(receiver, 10.0, quest["stale_timeout_s"])
         state = backend.connect()
@@ -614,6 +656,21 @@ def main() -> None:
             if control_gripper
             else None
         )
+        feedforward_config = hardware.get("arm_velocity_feedforward", {}) or {}
+        arm_feedforward_filter = (
+            VelocityFeedforwardFilter(
+                q_command,
+                filter_alpha=feedforward_config["filter_alpha"],
+                gain=feedforward_config["gain"],
+                max_velocity=np.asarray(
+                    feedforward_config["max_velocity_rad_s"],
+                    dtype=float,
+                ),
+            )
+            if feedforward_config.get("enabled", False)
+            else None
+        )
+        q_feedforward_velocity = np.zeros(6)
         q_feedback = settled.q_arm.copy()
         gripper_feedback = float(settled.gripper_position_m)
         last_sample = None
@@ -659,6 +716,8 @@ def main() -> None:
         print(
             f"{mode}: {command_cadence}, {hardware['command_goal_time_s'] * 1000:g} ms "
             f"driver horizon, {output_scope}, configured pose scale and motion limits, "
+            f"velocity feedforward "
+            f"{'enabled' if arm_feedforward_filter is not None else 'disabled'}, "
             "left grip is the deadman"
         )
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
@@ -712,6 +771,9 @@ def main() -> None:
                             joint_limiter.reset(q_command)
                         if gripper_limiter is not None:
                             gripper_limiter.reset(np.array([gripper_command]))
+                        if arm_feedforward_filter is not None:
+                            arm_feedforward_filter.reset(q_command)
+                            q_feedforward_velocity = np.zeros(6)
                         if not mapper.engaged:
                             filtered_controller = None
                             controller_filter.reset()
@@ -796,6 +858,14 @@ def main() -> None:
                         gripper_result = gripper_limiter.step(np.array([gripper_des]), limiter_dt)
                         gripper_command = float(gripper_result.command[0])
                         limiter_flags.extend(gripper_result.flags("gripper"))
+                    if arm_feedforward_filter is not None:
+                        q_feedforward_velocity = arm_feedforward_filter.update(
+                            q_command,
+                            limiter_dt,
+                        )
+                elif arm_feedforward_filter is not None:
+                    arm_feedforward_filter.reset(q_command)
+                    q_feedforward_velocity = np.zeros(6)
                 command_gate.validate(q_command, gripper_command)
                 if model.in_self_collision(q_command, gripper_command):
                     raise HardwareSafetyError("pinned 2025 MuJoCo model predicts a self-collision")
@@ -815,11 +885,19 @@ def main() -> None:
                         # then enforce the no-burst interval at the final send
                         # boundary. An overrun is never repaid with catch-up.
                         time.sleep(pre_send_wait_s)
-                backend.send_positions(
-                    q_command,
-                    gripper_command,
-                    include_gripper=control_gripper,
-                )
+                if arm_feedforward_filter is None:
+                    backend.send_positions(
+                        q_command,
+                        gripper_command,
+                        include_gripper=control_gripper,
+                    )
+                else:
+                    backend.send_positions(
+                        q_command,
+                        gripper_command,
+                        include_gripper=control_gripper,
+                        arm_feedforward_velocity=q_feedforward_velocity,
+                    )
                 command_send_ns = time.perf_counter_ns()
                 command_send_epoch_ns = time.time_ns()
                 last_command_send_s = command_send_ns / 1e9
@@ -883,6 +961,7 @@ def main() -> None:
                     mapped_target_quaternion_wxyz="" if target_pose is None else target_pose.quaternion_wxyz,
                     q_des=q_des,
                     q_cmd=q_command,
+                    q_feedforward_velocity=q_feedforward_velocity,
                     q_feedback=q_feedback,
                     q_feedback_reference=q_feedback_reference,
                     q_feedback_error=q_feedback_error,
