@@ -63,8 +63,8 @@ Clone with the pinned Trossen model submodules:
 
 ```bash
 git clone --recurse-submodules \
-  https://github.com/ApurvK032/aurel-vr-teleop-widowxai.git
-cd aurel-vr-teleop-widowxai
+  https://github.com/sys3-lab/vr-telop-widowxai.git
+cd vr-telop-widowxai
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -124,9 +124,16 @@ repository contains only compact publishable data:
 The current runtime controls exactly one arm. Do not attempt bimanual operation
 by launching two independent hardware processes.
 
-The staged design for bimanual WebXR packets, independent per-arm state,
-dual-arm MuJoCo, cross-arm collision checks, and coordinated fault handling is
-in [`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md).
+The current Hand and Behind/Mirrored controls select one controller for the
+single arm; they are not a two-arm interface. A two-arm implementation must
+capture both controllers in the same WebXR frame, use an independent accepted
+calibration for each arm, solve both arms in one coordinated runtime, and check
+cross-arm collisions in one MuJoCo scene.
+
+The complete prerequisites, code map, proposed configuration, staged
+implementation workflow, safety validation, and definition of done are in
+[`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md). It is a development
+guide; no physical two-arm launcher exists yet.
 
 ## Repository map
 

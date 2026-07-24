@@ -463,8 +463,9 @@ alone makes the mapping correct; validate each signed direction and rotation.
 - A clean-project handoff was prepared for a second Windows laptop.
 - The project was pushed to the user's personal GitHub repository:
   `ApurvK032/aurel-vr-teleop-widowxai`.
-- The user did not want GitHub CLI access to an organization. Personal-repo
-  access is sufficient; do not request organization access.
+- The user initially kept GitHub CLI access limited to the personal repository.
+  During the later release pass, the official GitHub CLI was authorized for the
+  private `sys3-lab` organization repository.
 - Windows MuJoCo execution worked.
 - Trossen documentation did not support the WidowXAI Python driver on Windows,
   so physical execution moved back to this Ubuntu PC.
@@ -758,16 +759,24 @@ records. Do not infer acceptance for the three remaining page profiles.
 
 ## Git and recovery
 
-Remote:
+Publishing target:
+
+```text
+https://github.com/sys3-lab/vr-telop-widowxai
+```
+
+The historical personal remote remains:
 
 ```text
 https://github.com/ApurvK032/aurel-vr-teleop-widowxai
 ```
 
-At the start of the hygiene pass, local `main` was nine commits ahead of
-`origin/main`. Do not claim remote backup until a push is explicitly completed.
-Do not request GitHub organization access; the project is in the user's personal
-repository.
+At the start of the hygiene pass, local `main` was nine commits ahead of the
+personal `origin/main`. GitHub initially rejected the organization push under
+GH007 because ten commits used the user's private email address. The owner then
+resolved the GitHub email-privacy gate and the private organization `main`
+branch was confirmed at release commit `8647b3d`. Do not expose or copy OAuth
+tokens into project files or documentation.
 
 Recovery points:
 

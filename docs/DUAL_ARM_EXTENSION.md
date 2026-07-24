@@ -4,6 +4,34 @@ The current project controls one WidowXAI. This document defines a safe path to
 two arms without duplicating two single-arm processes and hoping they remain
 synchronized.
 
+> **Current status:** this is an implementation and validation guide, not a
+> working two-arm launcher. The repository does not currently provide a
+> copy-paste command that can move two physical arms.
+
+## What exists today
+
+The validated runtime controls one arm from one selected Quest controller. The
+Quest page discovers both controllers, but captures and transmits only the hand
+chosen in the **Hand** menu. The hardware process then locks that hand and its
+Behind/Mirrored mapping for the entire run.
+
+The accepted physical baseline is **Right + Mirrored** at 50% task scale. That
+acceptance applies to one WidowXAI only. Left/Behind, Left/Mirrored, and
+Right/Behind are not automatically accepted for a second arm.
+
+Do not remove the current hand/mapping controls from the validated single-arm
+mode. A dual-arm mode must instead:
+
+- obtain left and right controller poses from the same WebXR frame;
+- transmit both poses and both button states in one packet;
+- map the left controller to the configured left arm and the right controller
+  to the configured right arm;
+- use a separately measured task-frame calibration for each arm; and
+- retain the existing single-arm page and profile as a rollback path.
+
+Behind/Mirrored is a single-arm operator-view convention, not a substitute for
+calibrating two arm bases. Do not apply one global mirror switch to both arms.
+
 ## Target architecture
 
 ```text
@@ -15,6 +43,10 @@ Quest left + right controllers
        -> right calibration/filter/clutch/IK -> right arm driver
   -> dual-arm MuJoCo collision model and telemetry
 ```
+
+This follows the reference kit's bimanual principle—both controllers produce
+one coordinated action—while retaining the WidowXAI-specific lifecycle and
+safety gates developed in this repository.
 
 Each arm needs independent state:
 
@@ -34,6 +66,36 @@ The two arms share:
 - a fault policy that can hold or return both arms safely;
 - one telemetry record per control tick.
 
+## Developer starting point
+
+1. Clone the repository with submodules and build the normal simulation
+   environment using [`SETUP_AND_OPERATION.md`](SETUP_AND_OPERATION.md).
+2. Run the complete offline test suite.
+3. Run the accepted single-arm profile in MuJoCo and save its result as a
+   regression baseline.
+4. Create a dedicated development branch for the dual-arm work.
+5. Keep every physical backend disabled until the dual-arm MuJoCo and fault
+   tests below pass.
+
+The single-arm implementation is the reference behavior. Refactor reusable
+pieces out of it; do not replace it with an untested two-arm-only launcher.
+
+## Hardware and network prerequisites
+
+Before physical development, obtain:
+
+- two firmly mounted WidowXAI follower arms;
+- two controller IP addresses that are unique on the same dedicated LAN;
+- an Ubuntu workstation that can reach both arms over wired Ethernet;
+- confirmed compatible driver/firmware pairs for both controllers;
+- measured transforms from a shared world frame to each arm base;
+- a dual-arm MuJoCo scene matching those base transforms;
+- independent power isolation or an immediately reachable shared power cutoff;
+- a Quest 3 and both tracked Touch Plus controllers.
+
+Do not copy the IP addresses below into hardware. Discover and document the
+actual lab configuration without raw-probing TCP port `50001`.
+
 ## Required changes
 
 ### 1. Bimanual transport
@@ -45,25 +107,73 @@ timestamps, reconnect handling, and capacity-one/latest-state behavior.
 Do not merge two independently timed WebSocket streams at the driver layer.
 One frame-level packet makes controller alignment and stale detection explicit.
 
+Recommended packet shape:
+
+```json
+{
+  "type": "bimanual_pose",
+  "schema_version": 2,
+  "sequence": 123,
+  "capture_monotonic_ms": 456.7,
+  "left": {
+    "position": [0, 0, 0],
+    "orientation_xyzw": [0, 0, 0, 1],
+    "grip": 0,
+    "trigger": 0
+  },
+  "right": {
+    "position": [0, 0, 0],
+    "orientation_xyzw": [0, 0, 0, 1],
+    "grip": 0,
+    "trigger": 0
+  }
+}
+```
+
+Reject the entire packet if its shared timestamps or sequence are invalid.
+Represent per-controller optical loss explicitly instead of silently reusing an
+old pose.
+
 ### 2. Configuration schema
 
 Replace single `quest` and `hardware` blocks with explicit arms:
 
 ```yaml
+project:
+  mode: dual_widowxai
+
+quest:
+  mode: bimanual
+  websocket_url: ws://127.0.0.1:8443/ws
+
 arms:
   left:
     controller_hand: left
-    robot_ip: 192.168.1.2
-    calibration: configs/calibrations/left_*.json
+    robot_ip: LEFT_ARM_IP
+    calibration: configs/calibrations/dual_left_accepted.json
+    base_transform: [MEASURED_LEFT_BASE_TRANSFORM]
   right:
     controller_hand: right
-    robot_ip: 192.168.1.3
-    calibration: configs/calibrations/right_*.json
+    robot_ip: RIGHT_ARM_IP
+    calibration: configs/calibrations/dual_right_accepted.json
+    base_transform: [MEASURED_RIGHT_BASE_TRANSFORM]
+
+safety:
+  cross_arm_collision: true
+  coordinated_fault_hold: true
 ```
 
 Keep global transport, cadence, telemetry, and coordinated safety policy
 separate from per-arm settings. Do not copy the example IPs without checking
 the actual controllers.
+
+Fail configuration loading when:
+
+- both arms use the same IP;
+- both arms reference the same logical controller hand;
+- either calibration is missing or not explicitly accepted;
+- base transforms are missing;
+- cross-arm collision checking is disabled for live output.
 
 ### 3. Dual-arm MuJoCo model
 
@@ -105,6 +215,54 @@ Refactor the current launcher into:
 Never raw-probe either controller's TCP port. Connect each official driver only
 after both Quest profiles and both complete startup paths pass offline checks.
 
+## Code map
+
+| Area | Current file | Dual-arm work |
+|---|---|---|
+| WebXR capture | `src/widowxai_quest_teleop/web/client.js` | Capture both `gripSpace` poses in one frame and emit schema v2 |
+| Sample types | `src/widowxai_quest_teleop/types.py` | Add a bimanual sample with optional validity per hand |
+| Parsing/mailbox | `src/widowxai_quest_teleop/transport.py` | Parse both hands into one capacity-one sample |
+| Configuration | `src/widowxai_quest_teleop/config.py` | Validate global plus per-arm blocks |
+| Mapping/IK | `mapping.py`, `ik.py`, `model.py` | Instantiate isolated state per arm |
+| Hardware lifecycle | `scripts/run_hardware.py`, `hardware.py` | Extract reusable per-arm runtime and add a coordinator |
+| Simulation | `scripts/run_live_sim.py` | Add a scene containing both arms and cross-collision checks |
+| Telemetry | `telemetry.py` | Record both targets, commands, feedback, skew, and fault state per tick |
+| Acceptance | `tests/` | Add bimanual transport, clutch, collision, lifecycle, and failure tests |
+
+Do not weaken the current single-arm tests while extracting reusable classes.
+Add dual-arm tests alongside them.
+
+## Intended entry points
+
+After implementation, provide separate entry points rather than changing the
+meaning of the current single-arm commands:
+
+```text
+scripts/run_dual_sim.py
+scripts/preflight_dual_hardware.py
+scripts/run_dual_hardware.py
+configs/dual_widowxai.yaml
+```
+
+The intended workflow is:
+
+```bash
+# Future command: this script does not exist yet.
+env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
+  --config configs/dual_widowxai.yaml
+```
+
+```bash
+# Future no-motion command: this script does not exist yet.
+env -u PYTHONPATH .venv-arm18/bin/python scripts/preflight_dual_hardware.py \
+  --config configs/dual_widowxai.yaml
+```
+
+Only after simulation and no-motion acceptance should a live launcher be
+implemented. It must require a new confirmation token containing both verified
+arm IPs. The existing single-arm `LIVE-WIDOWXAI-<IP>` token must never enable
+two arms.
+
 ## Validation sequence
 
 1. Unit-test bimanual packet parsing, stale handling, and per-arm clutching.
@@ -120,6 +278,36 @@ after both Quest profiles and both complete startup paths pass offline checks.
 
 Record command skew, per-arm encoder response, IK failures, collision margins,
 stale/reanchor events, and shutdown completion in every stage.
+
+For the twelve motion checks, validate these independently for each controller:
+
+1. left/right;
+2. up/down;
+3. forward/back;
+4. screw/twist;
+5. nod yes;
+6. nod no.
+
+Then validate independent grip engagement, simultaneous engagement, each
+gripper trigger, one-controller tracking loss, shared relay loss, one-driver
+failure, and Ctrl+C during motion.
+
+## Definition of done
+
+Dual-arm support is ready for routine laboratory testing only when:
+
+- both controller poses originate from one timestamped WebXR frame;
+- each controller drives only its assigned arm through an accepted calibration;
+- all twelve signed motions pass in the combined MuJoCo scene;
+- self-collision and cross-arm collision paths fail closed;
+- one-arm and shared tracking failures produce the documented holds;
+- partial driver connection and mid-run driver loss cannot leave either arm in
+  uncontrolled motion;
+- startup and shutdown complete safely from every tested intermediate state;
+- command skew and latency are recorded rather than assumed;
+- the existing accepted one-arm profile still passes its full regression suite;
+- the README is updated from “planned” only after physical acceptance evidence
+  is recorded.
 
 ## Reuse versus replacement
 
@@ -139,3 +327,13 @@ Must be redesigned:
 - the single-arm launcher and safety state machine;
 - MuJoCo scene/model ownership;
 - collision screening and coordinated shutdown.
+
+## Prohibited shortcuts
+
+- Do not launch two copies of `scripts/run_hardware.py`.
+- Do not give two processes independent views of the same Quest stream.
+- Do not use two separate MuJoCo models for physical collision approval.
+- Do not reuse the Right + Mirrored calibration for the second arm.
+- Do not treat the current Hand/Mirrored UI as a bimanual controller selector.
+- Do not connect either physical backend until both profiles and both startup
+  paths pass the coordinated offline preflight.

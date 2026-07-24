@@ -36,8 +36,8 @@ Clone the repository and its pinned Trossen model submodules:
 
 ```bash
 git clone --recurse-submodules \
-  https://github.com/ApurvK032/aurel-vr-teleop-widowxai.git
-cd aurel-vr-teleop-widowxai
+  https://github.com/sys3-lab/vr-telop-widowxai.git
+cd vr-telop-widowxai
 git submodule update --init --recursive
 ```
 
@@ -201,6 +201,21 @@ The launcher:
 
 The accepted profile can run without an internal deadline, but explicit short
 `--duration` values are recommended during development.
+
+## Two-arm development
+
+The commands above operate one arm from one selected controller. Do not repeat
+them in two terminals to control two arms.
+
+The current Quest Hand and Behind/Mirrored controls are single-arm inputs. A
+correct dual-arm runtime must capture both controllers simultaneously, maintain
+independent calibration/IK/driver state, use a combined collision model, and
+coordinate all startup, fault, and shutdown behavior. No physical dual-arm
+command exists yet.
+
+Follow [`DUAL_ARM_EXTENSION.md`](DUAL_ARM_EXTENSION.md) for the prerequisites,
+code touchpoints, proposed configuration, implementation phases, and validation
+gates.
 
 ## Calibration
 
