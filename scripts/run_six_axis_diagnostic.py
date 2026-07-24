@@ -175,7 +175,12 @@ def build_plan_for_state(
 
 def create_run_dir(config: dict, label: str) -> Path:
     output_root = resolve_project_path(config["telemetry"]["output_dir"])
-    run_dir = output_root / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{label}"
+    now = datetime.now()
+    run_dir = (
+        output_root
+        / now.strftime("%Y-%m-%d")
+        / f"{now.strftime('%Y%m%d-%H%M%S')}_{label}"
+    )
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 

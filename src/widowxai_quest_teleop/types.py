@@ -29,5 +29,6 @@ class QuestSample:
     controller_pose: Pose
     grip: float
     trigger: float
+    hand: str
+    mapping_mode: str
     head_quaternion_wxyz: np.ndarray | None = None
-

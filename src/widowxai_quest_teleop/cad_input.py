@@ -53,6 +53,7 @@ class CadJointSample:
     arrival_monotonic_ns: int
     arrival_epoch_ns: int
     q: np.ndarray
+    root_locked: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.sequence, bool) or int(self.sequence) < 0:
@@ -66,6 +67,9 @@ class CadJointSample:
         object.__setattr__(self, "arrival_monotonic_ns", int(self.arrival_monotonic_ns))
         object.__setattr__(self, "arrival_epoch_ns", int(self.arrival_epoch_ns))
         object.__setattr__(self, "q", _finite_vector(self.q, 5, "CAD q").copy())
+        if not isinstance(self.root_locked, (bool, np.bool_)):
+            raise CadInputError("CAD root_locked must be boolean")
+        object.__setattr__(self, "root_locked", bool(self.root_locked))
 
 
 def parse_cad_joint_packet(
@@ -76,6 +80,7 @@ def parse_cad_joint_packet(
     arrival_epoch_ns: int | None = None,
     max_packet_age_s: float = 0.100,
     max_future_skew_s: float = 0.050,
+    require_root_locked: bool = False,
 ) -> CadJointSample:
     """Parse one M3T joint packet and reject incomplete or delayed state."""
 
@@ -90,6 +95,12 @@ def parse_cad_joint_packet(
         raise CadInputError("CAD packet is not valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):
         raise CadInputError("CAD packet must be a JSON object")
+
+    root_locked = payload.get("root_locked", False)
+    if not isinstance(root_locked, bool):
+        raise CadInputError("CAD packet root_locked must be boolean")
+    if require_root_locked and not root_locked:
+        raise CadInputError("CAD packet rejected because the M3T root is not locked")
 
     expected = tuple(str(name) for name in expected_names)
     names_raw = payload.get("names")
@@ -138,6 +149,7 @@ def parse_cad_joint_packet(
         arrival_monotonic_ns=monotonic_ns,
         arrival_epoch_ns=epoch_ns,
         q=ordered,
+        root_locked=root_locked,
     )
 
 
@@ -420,12 +432,14 @@ class CadUdpReceiver:
         expected_names: Sequence[str] = DEFAULT_CAD_JOINT_NAMES,
         max_packet_age_s: float = 0.100,
         max_future_skew_s: float = 0.050,
+        require_root_locked: bool = False,
     ) -> None:
         self.host = str(host)
         self.port = int(port)
         self.expected_names = tuple(expected_names)
         self.max_packet_age_s = float(max_packet_age_s)
         self.max_future_skew_s = float(max_future_skew_s)
+        self.require_root_locked = bool(require_root_locked)
         self.mailbox: LatestValueMailbox[CadJointSample] = LatestValueMailbox()
         self.received_packets = 0
         self.valid_packets = 0
@@ -483,6 +497,7 @@ class CadUdpReceiver:
                     arrival_epoch_ns=arrival_epoch_ns,
                     max_packet_age_s=self.max_packet_age_s,
                     max_future_skew_s=self.max_future_skew_s,
+                    require_root_locked=self.require_root_locked,
                 )
             except (CadInputError, ValueError) as exc:
                 self.invalid_packets += 1

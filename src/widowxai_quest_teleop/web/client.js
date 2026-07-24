@@ -9,8 +9,31 @@ const capturedText = document.getElementById("captured");
 const sentText = document.getElementById("sent");
 const coalescedText = document.getElementById("coalesced");
 const calibrationText = document.getElementById("calibration");
+const controllerDescription = document.getElementById("controller-description");
+const handSelect = document.getElementById("hand-select");
+const mappingModeSelect = document.getElementById("mapping-mode-select");
+const applyInputButton = document.getElementById("apply-input");
+const inputSelectionText = document.getElementById("input-selection");
 const canvas = document.getElementById("xr-canvas");
 
+const INPUT_SELECTION_STORAGE_KEY = "widowxai.inputSelection";
+const query = new URL(location.href).searchParams;
+
+function savedInputSelection() {
+  try {
+    const value = JSON.parse(localStorage.getItem(INPUT_SELECTION_STORAGE_KEY) || "null");
+    return value && typeof value === "object" ? value : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+const savedSelection = savedInputSelection();
+const requestedHand = query.get("hand") || savedSelection.hand || "left";
+const requestedMappingMode = query.get("mode") || savedSelection.mappingMode || "real";
+let selectedHand = requestedHand === "right" ? "right" : "left";
+let selectedMappingMode = requestedMappingMode === "mirror" ? "mirror" : "real";
+let wristOffsetStorageKey = `widowxai.${selectedHand}WristOffset`;
 let socket = null;
 let session = null;
 let sessionMode = "immersive-vr";
@@ -21,15 +44,41 @@ let sequence = 0;
 let captured = 0;
 let sent = 0;
 let coalesced = 0;
-let leftInputSource = null;
+let selectedInputSource = null;
 // Lock the operator's intended forward direction when passthrough starts.
 // Otherwise placing the headset down can rotate the task frame on re-clutch.
 let operatorHead = null;
-let wristOffset = JSON.parse(localStorage.getItem("widowxai.leftWristOffset") || "null");
+let wristOffset = JSON.parse(localStorage.getItem(wristOffsetStorageKey) || "null");
 let calibrationArmed = wristOffset === null;
 let calibrationStartedAt = null;
 let calibrationSamples = [];
-calibrationText.textContent = wristOffset ? `${wristOffset.map((v) => v.toFixed(3)).join(", ")} m` : "Not calibrated";
+
+function mappingModeLabel() {
+  return selectedMappingMode === "mirror"
+    ? "Mirrored (left/right, front/back, screw, and nod-no flipped)"
+    : "Behind / Parallel (matched motion)";
+}
+
+function refreshInputSelection() {
+  wristOffsetStorageKey = `widowxai.${selectedHand}WristOffset`;
+  wristOffset = JSON.parse(localStorage.getItem(wristOffsetStorageKey) || "null");
+  calibrationArmed = wristOffset === null;
+  calibrationStartedAt = null;
+  calibrationSamples = [];
+  handSelect.value = selectedHand;
+  mappingModeSelect.value = selectedMappingMode;
+  calibrationText.textContent = wristOffset ? `${wristOffset.map((v) => v.toFixed(3)).join(", ")} m` : "Not calibrated";
+  controllerDescription.textContent = `This page streams the ${selectedHand} Meta Quest controller using ${mappingModeLabel().toLowerCase()}. Grip is the clutch; trigger controls the gripper.`;
+  inputSelectionText.textContent = `Active: ${selectedHand} controller · ${mappingModeLabel()}`;
+}
+
+function setInputControlsDisabled(disabled) {
+  handSelect.disabled = disabled;
+  mappingModeSelect.disabled = disabled;
+  applyInputButton.disabled = disabled;
+}
+
+refreshInputSelection();
 
 function setStatus(text, ok = false) {
   statusText.textContent = text;
@@ -66,8 +115,8 @@ function connectRelay() {
   socket.onmessage = (event) => {
     let message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
-    if (message.type === "haptic" && leftInputSource && leftInputSource.gamepad) {
-      const actuator = leftInputSource.gamepad.hapticActuators?.[0];
+    if (message.type === "haptic" && selectedInputSource && selectedInputSource.gamepad) {
+      const actuator = selectedInputSource.gamepad.hapticActuators?.[0];
       if (actuator) actuator.pulse(Math.max(0, Math.min(1, Number(message.intensity) || 0)), Number(message.duration_ms) || 40);
     }
     if (message.type === "calibration_prompt" && typeof message.text === "string") {
@@ -166,7 +215,7 @@ function finishWristCalibration() {
   wristOffset = solve3x3(normal, rhs.map((value) => -value));
   const norm = Math.hypot(...wristOffset);
   if (!Number.isFinite(norm) || norm > 0.20) throw new Error("offset failed sanity check");
-  localStorage.setItem("widowxai.leftWristOffset", JSON.stringify(wristOffset));
+  localStorage.setItem(wristOffsetStorageKey, JSON.stringify(wristOffset));
   calibrationText.textContent = `${wristOffset.map((v) => v.toFixed(3)).join(", ")} m`;
   calibrationArmed = false;
   calibrationStartedAt = null;
@@ -187,15 +236,18 @@ function onXRFrame(frameTime, frame) {
     setStatus("Operator forward locked; streaming", true);
   }
 
-  leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
+  const leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
   const rightInputSource = Array.from(session.inputSources).find((source) => source.handedness === "right" && source.gripSpace) || null;
-  const controllerPose = leftInputSource ? frame.getPose(leftInputSource.gripSpace, referenceSpace) : null;
+  selectedInputSource = selectedHand === "right" ? rightInputSource : leftInputSource;
+  const controllerPose = selectedInputSource ? frame.getPose(selectedInputSource.gripSpace, referenceSpace) : null;
   if (!controllerPose) return;
-  const bothGrips = buttonValue(leftInputSource.gamepad, 1) >= 0.7 && buttonValue(rightInputSource?.gamepad, 1) >= 0.7;
-  if (calibrationArmed && calibrationStartedAt === null && bothGrips) {
+  const calibrationChord = selectedHand === "right"
+    ? buttonValue(selectedInputSource?.gamepad, 1) >= 0.7 && buttonValue(selectedInputSource?.gamepad, 0) >= 0.7
+    : buttonValue(leftInputSource?.gamepad, 1) >= 0.7 && buttonValue(rightInputSource?.gamepad, 1) >= 0.7;
+  if (calibrationArmed && calibrationStartedAt === null && calibrationChord) {
     calibrationStartedAt = frameTime;
     calibrationSamples = [];
-    setStatus("Calibrating: twist both wrists, keep wrist pivots still", true);
+    setStatus(`Calibrating ${selectedHand} wrist: rotate it while keeping its pivot still`, true);
   }
   if (calibrationStartedAt !== null) {
     calibrationSamples.push({
@@ -215,15 +267,17 @@ function onXRFrame(frameTime, frame) {
   const nextPacket = {
     type: "pose",
     schema_version: 1,
+    selected_hand: selectedHand,
+    mapping_mode: selectedMappingMode,
     sequence: sequence++,
     capture_monotonic_ms: frameTime,
     capture_epoch_ms: performance.timeOrigin + frameTime,
     enqueue_monotonic_ms: performance.now(),
     send_monotonic_ms: 0,
-    left: {
+    [selectedHand]: {
       ...transformObject(controllerPose.transform, wristOffset || [0, 0, 0]),
-      grip: buttonValue(leftInputSource.gamepad, 1),
-      trigger: buttonValue(leftInputSource.gamepad, 0),
+      grip: buttonValue(selectedInputSource.gamepad, 1),
+      trigger: buttonValue(selectedInputSource.gamepad, 0),
     },
     head: viewerPose ? transformObject(viewerPose.transform) : null,
     operator_head: operatorHead,
@@ -259,11 +313,18 @@ enterButton.addEventListener("click", async () => {
       operatorHead = null;
       enterButton.disabled = false;
       exitButton.disabled = true;
+      setInputControlsDisabled(false);
       setStatus("Relay connected; VR stopped", true);
     });
     enterButton.disabled = true;
     exitButton.disabled = false;
-    setStatus(sessionMode === "immersive-ar" ? "Streaming in passthrough" : "Streaming left controller", true);
+    setInputControlsDisabled(true);
+    setStatus(
+      sessionMode === "immersive-ar"
+        ? `Streaming ${selectedHand} · ${mappingModeLabel()} in passthrough`
+        : `Streaming ${selectedHand} · ${mappingModeLabel()} in VR`,
+      true,
+    );
     session.requestAnimationFrame(onXRFrame);
   } catch (error) {
     setStatus(`Unable to enter VR: ${error.message}`);
@@ -271,11 +332,29 @@ enterButton.addEventListener("click", async () => {
 });
 
 exitButton.addEventListener("click", () => session?.end());
+applyInputButton.addEventListener("click", () => {
+  if (session) {
+    setStatus("Exit VR before changing controller input");
+    return;
+  }
+  selectedHand = handSelect.value === "right" ? "right" : "left";
+  selectedMappingMode = mappingModeSelect.value === "mirror" ? "mirror" : "real";
+  localStorage.setItem(INPUT_SELECTION_STORAGE_KEY, JSON.stringify({
+    hand: selectedHand,
+    mappingMode: selectedMappingMode,
+  }));
+  refreshInputSelection();
+  setStatus(
+    `Input set to ${selectedHand} · ${mappingModeLabel()}; enter passthrough`,
+    true,
+  );
+});
 calibrateButton.addEventListener("click", () => {
   calibrationArmed = true;
   calibrationStartedAt = null;
   calibrationSamples = [];
-  calibrationText.textContent = "Armed: squeeze both grips in VR";
-  setStatus("Enter VR, squeeze both grips, then twist wrists for 5 seconds", true);
+  const chord = selectedHand === "right" ? "hold right grip + right trigger" : "squeeze both grip buttons";
+  calibrationText.textContent = `Armed for ${selectedHand} wrist: ${chord} in VR`;
+  setStatus(`Enter VR, ${chord}, then rotate the ${selectedHand} wrist for 5 seconds`, true);
 });
 connectRelay();

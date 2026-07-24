@@ -12,16 +12,92 @@ from .sample_buffer import LatestValueMailbox
 from .types import Pose, QuestSample
 
 
-def parse_pose_message(raw: str | dict[str, Any]) -> QuestSample:
+QUEST_HANDS = ("left", "right")
+QUEST_MAPPING_MODES = ("real", "mirror")
+
+
+def _validated_selection(
+    value: str | None,
+    choices: tuple[str, ...],
+    label: str,
+) -> str | None:
+    if value is None:
+        return None
+    selected = str(value).lower()
+    if selected not in choices:
+        raise ValueError(f"unsupported Quest {label}: {value}")
+    return selected
+
+
+def _reported_hand(payload: dict[str, Any], expected_hand: str | None) -> str:
+    reported = payload.get("selected_hand")
+    if reported is not None:
+        selected = _validated_selection(str(reported), QUEST_HANDS, "hand")
+        assert selected is not None
+        return selected
+    if expected_hand is not None:
+        return expected_hand
+    available = [hand for hand in QUEST_HANDS if isinstance(payload.get(hand), dict)]
+    if len(available) != 1:
+        raise ValueError("pose message must identify exactly one selected controller")
+    return available[0]
+
+
+def _mirror_webxr_pose(
+    position: np.ndarray,
+    orientation_xyzw: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reflect a pose across WebXR's operator sagittal plane."""
+
+    mirrored_position = position.copy()
+    mirrored_position[0] *= -1.0
+    mirrored_orientation = orientation_xyzw.copy()
+    mirrored_orientation[1:3] *= -1.0
+    return mirrored_position, mirrored_orientation
+
+
+def parse_pose_message(
+    raw: str | dict[str, Any],
+    hand: str | None = "left",
+    mapping_mode: str | None = "real",
+) -> QuestSample:
     payload = json.loads(raw) if isinstance(raw, str) else raw
     if payload.get("type") != "pose":
         raise ValueError("not a pose message")
-    left = payload.get("left")
-    if not isinstance(left, dict):
-        raise ValueError("pose message has no left controller")
-    xyzw = np.asarray(left["orientation_xyzw"], dtype=float).reshape(4)
+    expected_hand = _validated_selection(hand, QUEST_HANDS, "hand")
+    expected_mapping_mode = _validated_selection(
+        mapping_mode,
+        QUEST_MAPPING_MODES,
+        "mapping mode",
+    )
+    selected_hand = _reported_hand(payload, expected_hand)
+    if expected_hand is not None and selected_hand != expected_hand:
+        raise ValueError(
+            f"Quest page selected {selected_hand}, expected {expected_hand}"
+        )
+    selected_mapping_mode = _validated_selection(
+        str(payload.get("mapping_mode", "real")),
+        QUEST_MAPPING_MODES,
+        "mapping mode",
+    )
+    assert selected_mapping_mode is not None
+    if (
+        expected_mapping_mode is not None
+        and selected_mapping_mode != expected_mapping_mode
+    ):
+        raise ValueError(
+            "Quest page selected mapping mode "
+            f"{selected_mapping_mode}, expected {expected_mapping_mode}"
+        )
+    controller_payload = payload.get(selected_hand)
+    if not isinstance(controller_payload, dict):
+        raise ValueError(f"pose message has no {selected_hand} controller")
+    xyzw = np.asarray(controller_payload["orientation_xyzw"], dtype=float).reshape(4)
+    position = np.asarray(controller_payload["position"], dtype=float).reshape(3)
+    if selected_mapping_mode == "mirror":
+        position, xyzw = _mirror_webxr_pose(position, xyzw)
     controller = Pose(
-        np.asarray(left["position"], dtype=float),
+        position,
         np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=float),
     )
     head_wxyz = None
@@ -42,8 +118,10 @@ def parse_pose_message(raw: str | dict[str, Any]) -> QuestSample:
         pc_arrival_epoch_ns=time.time_ns(),
         reconnect_generation=int(payload.get("reconnect_generation", 0)),
         controller_pose=controller,
-        grip=float(left.get("grip", 0.0)),
-        trigger=float(left.get("trigger", 0.0)),
+        grip=float(controller_payload.get("grip", 0.0)),
+        trigger=float(controller_payload.get("trigger", 0.0)),
+        hand=selected_hand,
+        mapping_mode=selected_mapping_mode,
         head_quaternion_wxyz=head_wxyz,
     )
 
@@ -51,8 +129,22 @@ def parse_pose_message(raw: str | dict[str, Any]) -> QuestSample:
 class QuestReceiver:
     """Reconnecting WebSocket subscriber backed by a capacity-one mailbox."""
 
-    def __init__(self, websocket_url: str) -> None:
+    def __init__(
+        self,
+        websocket_url: str,
+        *,
+        hand: str | None = "left",
+        mapping_mode: str | None = "real",
+    ) -> None:
+        selected_hand = _validated_selection(hand, QUEST_HANDS, "hand")
+        selected_mapping_mode = _validated_selection(
+            mapping_mode,
+            QUEST_MAPPING_MODES,
+            "mapping mode",
+        )
         self.websocket_url = websocket_url
+        self.hand = selected_hand
+        self.mapping_mode = selected_mapping_mode
         self.mailbox: LatestValueMailbox[QuestSample] = LatestValueMailbox()
         self.bad_messages = 0
         self.reconnects = 0
@@ -108,7 +200,11 @@ class QuestReceiver:
                             if self._stop.is_set():
                                 break
                             try:
-                                sample = parse_pose_message(raw)
+                                sample = parse_pose_message(
+                                    raw,
+                                    self.hand,
+                                    self.mapping_mode,
+                                )
                             except (ValueError, KeyError, TypeError, json.JSONDecodeError):
                                 self.bad_messages += 1
                                 continue

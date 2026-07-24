@@ -12,6 +12,7 @@ cad:
   udp_host: 127.0.0.1
   udp_port: 5055
   expected_names: [link1_link, link2_link, link3_link, link4_link, link5_link]
+  require_root_locked: true
   stale_timeout_s: 0.100
   fresh_samples_to_recover: 3
   max_packet_age_s: 0.100
@@ -24,9 +25,11 @@ cad:
   signs: [1.0, 1.0, -1.0, -1.0, -1.0]
   # Begin at ten percent leader-to-follower angular travel.
   scales: [0.10, 0.10, 0.10, 0.10, 0.10]
-  # Ignore sub-degree motion around every newly captured anchor. This keeps
-  # visual estimator jitter from requesting motion away from exact rest.
-  source_deadband_rad: [0.01, 0.01, 0.01, 0.01, 0.01]
+  # Commissioning deadbands measured from locked-root stationary traces. The
+  # Z-axis base-yaw and wrist-roll joints need larger thresholds because their
+  # CAD silhouettes are weak around the rotation axis. Deliberate isolated
+  # tests must cross these thresholds slowly before the scale is increased.
+  source_deadband_rad: [0.15, 0.02, 0.01, 0.025, 0.15]
 
 commissioning:
   # Two-degree global envelope around rest. J1 and J2 are at their official

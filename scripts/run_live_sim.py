@@ -7,7 +7,12 @@ import mujoco
 import numpy as np
 
 from widowxai_quest_teleop.clutch import ClutchController
-from widowxai_quest_teleop.config import load_config
+from widowxai_quest_teleop.config import (
+    TASK_PROFILE_NAMES,
+    apply_task_profile,
+    load_config,
+    task_profile_for_quest_selection,
+)
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.gripper import trigger_to_gripper_position
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
@@ -26,6 +31,43 @@ from widowxai_quest_teleop.transport import QuestReceiver
 from widowxai_quest_teleop.viewer import close_passive_viewer
 
 
+def wait_for_page_profile_sample(
+    receiver: QuestReceiver,
+    timeout_s: float,
+    stale_timeout_s: float,
+):
+    """Return the first fresh, grip-released sample used to lock a page profile."""
+
+    deadline = time.perf_counter() + float(timeout_s)
+    watchdog = FreshSequenceWatchdog(stale_timeout_s, fresh_samples_to_recover=3)
+    while time.perf_counter() < deadline:
+        sample, _ = receiver.mailbox.take_latest()
+        if sample is not None:
+            freshness = watchdog.observe(sample)
+            if freshness.fresh and sample.grip < 0.65:
+                return sample
+        time.sleep(0.01)
+    raise RuntimeError(
+        "page profile preflight failed: enter WebXR, keep grip released, "
+        "and provide fresh tracking"
+    )
+
+
+def require_locked_page_selection(
+    sample,
+    expected_hand: str,
+    expected_mapping_mode: str,
+) -> None:
+    """Reject a page selection change instead of swapping transforms in motion."""
+
+    if sample.hand != expected_hand or sample.mapping_mode != expected_mapping_mode:
+        raise RuntimeError(
+            "Quest page selection changed after preflight: "
+            f"received {sample.hand}/{sample.mapping_mode}, "
+            f"locked {expected_hand}/{expected_mapping_mode}; restart the run"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Drive WidowXAI MuJoCo simulation from a Quest 3")
     parser.add_argument("--config", default="configs/baseline.yaml")
@@ -36,10 +78,62 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=0.0, help="0 runs until Ctrl+C")
     parser.add_argument("--label", default="quest-live-sim")
+    parser.add_argument(
+        "--task-profile",
+        choices=TASK_PROFILE_NAMES,
+        help="strictly select one fixed hand and Behind/Mirror candidate",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
+    page_locked_task_profile = bool(
+        config["project"].get("page_locked_task_profile", False)
+    )
+    if (
+        config["project"].get("require_task_profile", False)
+        and not args.task_profile
+        and not page_locked_task_profile
+    ):
+        raise SystemExit("this configuration requires --task-profile")
+    if args.task_profile:
+        apply_task_profile(config, args.task_profile)
     quest_config = config["quest"]
+    select_profile_from_page = page_locked_task_profile and not args.task_profile
+    receiver = QuestReceiver(
+        quest_config["websocket_url"],
+        hand=None if select_profile_from_page else (
+            quest_config["hand"] if args.task_profile else None
+        ),
+        mapping_mode=None if select_profile_from_page else (
+            quest_config["mapping_mode"] if args.task_profile else None
+        ),
+    )
+    receiver.start()
+    if select_profile_from_page:
+        try:
+            preflight_sample = wait_for_page_profile_sample(
+                receiver,
+                10.0,
+                quest_config["stale_timeout_s"],
+            )
+            selected_profile = task_profile_for_quest_selection(
+                preflight_sample.hand,
+                preflight_sample.mapping_mode,
+            )
+            apply_task_profile(config, selected_profile)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            receiver.stop()
+            raise SystemExit(f"could not lock the page-selected task profile: {exc}") from None
+        quest_config = config["quest"]
+        print(
+            "preflight: page selected "
+            f"{preflight_sample.hand}/{preflight_sample.mapping_mode}; "
+            f"locked task profile {selected_profile}"
+        )
+    selection_locked = page_locked_task_profile or bool(args.task_profile)
+    selected_hand = quest_config["hand"]
+    selected_mapping_mode = quest_config["mapping_mode"]
+
     model = WidowXAIModel(config["model"]["xml_path"])
     solver = DecoupledIK.from_config(model, config)
     q_start = model.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
@@ -54,9 +148,6 @@ def main() -> None:
     watchdog = FreshSequenceWatchdog(
         quest_config["stale_timeout_s"], quest_config["fresh_samples_to_recover"]
     )
-    receiver = QuestReceiver(quest_config["websocket_url"])
-    receiver.start()
-
     sim_data = mujoco.MjData(model.model)
     hardware_config = config.get("hardware", {})
     gripper_open = float(hardware_config.get("gripper_open_m", 0.044))
@@ -127,6 +218,22 @@ def main() -> None:
                     sample, _ = receiver.mailbox.take_latest()
                 control_consume_ns = time.perf_counter_ns()
                 if sample is not None:
+                    if selection_locked:
+                        require_locked_page_selection(
+                            sample,
+                            selected_hand,
+                            selected_mapping_mode,
+                        )
+                    elif (
+                        last_sample is not None
+                        and (
+                            sample.hand != last_sample.hand
+                            or sample.mapping_mode != last_sample.mapping_mode
+                        )
+                    ):
+                        clutch.force_reanchor()
+                        controller_filter.reset()
+                        filtered_controller = None
                     last_sample = sample
                     freshness = watchdog.observe(sample)
                 else:
@@ -252,6 +359,8 @@ def main() -> None:
                     command_pre_send_wait_ms=pre_send_wait_s * 1000.0,
                     mailbox_overwrite_count=receiver.mailbox.overwrite_count,
                     reconnect_generation="" if last_sample is None else last_sample.reconnect_generation,
+                    quest_hand="" if last_sample is None else last_sample.hand,
+                    quest_mapping_mode="" if last_sample is None else last_sample.mapping_mode,
                     quest_grip="" if last_sample is None else last_sample.grip,
                     quest_trigger="" if last_sample is None else last_sample.trigger,
                     stream_fresh=freshness.fresh,

@@ -24,8 +24,13 @@ def heading_correction(quaternion_wxyz: np.ndarray) -> np.ndarray:
 def fit_direction_map(
     observed_vectors: np.ndarray,
     desired_vectors: np.ndarray,
+    *,
+    mapping_determinant: int = 1,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Fit the closest proper rotation that maps observed directions to desired ones."""
+    """Fit the closest orthogonal map with the requested handedness."""
+
+    if mapping_determinant not in (-1, 1):
+        raise ValueError("mapping_determinant must be -1 or +1")
     observed = np.asarray(observed_vectors, dtype=float).reshape(-1, 3)
     desired = np.asarray(desired_vectors, dtype=float).reshape(-1, 3)
     if observed.shape != desired.shape or len(observed) < 3:
@@ -43,11 +48,14 @@ def fit_direction_map(
     covariance = desired_unit.T @ observed_unit
     left, _, right_t = np.linalg.svd(covariance)
     correction = np.eye(3)
-    correction[-1, -1] = np.sign(np.linalg.det(left @ right_t))
+    correction[-1, -1] = mapping_determinant * np.sign(
+        np.linalg.det(left @ right_t)
+    )
     mapping = left @ correction @ right_t
 
     quality = direction_map_quality(mapping, observed_unit, desired_unit)
     quality["excitation_singular_values"] = excitation.tolist()
+    quality["mapping_determinant"] = float(np.linalg.det(mapping))
     return mapping, quality
 
 
@@ -55,9 +63,11 @@ def direction_map_quality(
     mapping: np.ndarray,
     observed_vectors: np.ndarray,
     desired_vectors: np.ndarray,
+    *,
+    axial_vectors: bool = False,
 ) -> dict[str, Any]:
     """Measure angular agreement for a fixed direction mapping."""
-    rotation = np.asarray(mapping, dtype=float).reshape(3, 3)
+    orthogonal_map = np.asarray(mapping, dtype=float).reshape(3, 3)
     observed = np.asarray(observed_vectors, dtype=float).reshape(-1, 3)
     desired = np.asarray(desired_vectors, dtype=float).reshape(-1, 3)
     if observed.shape != desired.shape or not len(observed):
@@ -68,7 +78,13 @@ def direction_map_quality(
         raise ValueError("calibration directions must be nonzero")
     observed_unit = observed / observed_norms[:, None]
     desired_unit = desired / desired_norms[:, None]
-    mapped = (rotation @ observed_unit.T).T
+    vector_map = orthogonal_map
+    if axial_vectors:
+        # A reflection F maps polar vectors as Fv, but axial vectors (including
+        # rotation vectors) as det(F)Fv. This is the vector form of the live
+        # mapper's F @ dR @ F.T conjugation.
+        vector_map = np.linalg.det(orthogonal_map) * orthogonal_map
+    mapped = (vector_map @ observed_unit.T).T
     alignment = np.sum(mapped * desired_unit, axis=1)
     alignment = np.clip(alignment, -1.0, 1.0)
     errors_deg = np.degrees(np.arccos(alignment))
@@ -90,10 +106,12 @@ def build_calibration_document(
     rotation_desired: np.ndarray,
     captures: list[dict[str, Any]],
     link_rotation_to_position: bool = False,
+    position_mapping_determinant: int = 1,
 ) -> dict[str, Any]:
     position_matrix, position_quality = fit_direction_map(
         position_observed,
         position_desired,
+        mapping_determinant=position_mapping_determinant,
     )
     if link_rotation_to_position:
         # Both controller translation deltas and dR_world rotation vectors are
@@ -104,6 +122,7 @@ def build_calibration_document(
             rotation_matrix,
             rotation_observed,
             rotation_desired,
+            axial_vectors=True,
         )
     else:
         rotation_matrix, rotation_quality = fit_direction_map(
@@ -124,6 +143,7 @@ def build_calibration_document(
         "quaternion_convention": "wxyz",
         "guided_calibration": {
             "rotation_frame_linked_to_position": bool(link_rotation_to_position),
+            "task_frame_determinant": float(np.linalg.det(position_matrix)),
             "position_quality": position_quality,
             "rotation_quality": rotation_quality,
             "captures": captures,

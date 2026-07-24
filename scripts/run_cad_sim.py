@@ -63,8 +63,13 @@ class CadTelemetryLogger:
     def __init__(self, label: str, config: dict, output_dir: str | Path) -> None:
         safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-") or "cad-rest-sim"
         stamp = time.strftime("%Y%m%d-%H%M%S")
+        day = time.strftime("%Y-%m-%d")
         suffix = time.time_ns() % 1_000_000_000
-        self.run_dir = resolve_project_path(output_dir) / f"{stamp}-{suffix:09d}_{safe_label}"
+        self.run_dir = (
+            resolve_project_path(output_dir)
+            / day
+            / f"{stamp}-{suffix:09d}_{safe_label}"
+        )
         self.run_dir.mkdir(parents=True, exist_ok=False)
         self.csv_path = self.run_dir / "cad_telemetry.csv"
         self._handle = self.csv_path.open("w", newline="", encoding="utf-8")
@@ -277,6 +282,7 @@ def main() -> None:
         expected_names=config["cad"]["expected_names"],
         max_packet_age_s=config["cad"]["max_packet_age_s"],
         max_future_skew_s=config["cad"]["max_future_skew_s"],
+        require_root_locked=config["cad"].get("require_root_locked", True),
     )
 
     gripper_q = float(config["model"]["gripper_preview_m"])
@@ -436,6 +442,7 @@ def main() -> None:
                     f"deadman={int(deadman_pressed)} engaged={int(controller.engaged)} "
                     f"needs_release={int(controller.needs_release)} "
                     f"discontinuity={freshness.last_discontinuity or 'none'} "
+                    f"q_source={np.array2string(last_sample.q if last_sample is not None else np.zeros(5), precision=4, suppress_small=True)} "
                     f"q_cmd={np.array2string(q_command, precision=4, suppress_small=True)}"
                 )
                 last_log = now

@@ -21,6 +21,7 @@ def packet(*, sequence=1, source_time_ns=1_000_000_000, names=None, q=None):
     return {
         "seq": sequence,
         "time_ns": source_time_ns,
+        "root_locked": True,
         "names": list(DEFAULT_CAD_JOINT_NAMES if names is None else names),
         "q": [0.0, 0.1, 0.2, 0.3, 0.4] if q is None else q,
     }
@@ -59,6 +60,25 @@ def test_packet_parser_requires_complete_named_finite_fresh_state() -> None:
         max_packet_age_s=0.1,
     )
     np.testing.assert_array_equal(parsed.q, np.arange(5.0))
+    assert parsed.root_locked
+
+    unlocked = packet()
+    unlocked["root_locked"] = False
+    with pytest.raises(CadInputError, match="root is not locked"):
+        parse_cad_joint_packet(
+            unlocked,
+            arrival_monotonic_ns=500,
+            arrival_epoch_ns=1_050_000_000,
+            require_root_locked=True,
+        )
+    malformed_lock = packet()
+    malformed_lock["root_locked"] = 1
+    with pytest.raises(CadInputError, match="must be boolean"):
+        parse_cad_joint_packet(
+            malformed_lock,
+            arrival_monotonic_ns=500,
+            arrival_epoch_ns=1_050_000_000,
+        )
 
     with pytest.raises(CadInputError, match="joint set mismatch"):
         parse_cad_joint_packet(
@@ -226,6 +246,27 @@ def test_mapper_deadband_holds_exact_rest_for_visual_jitter() -> None:
         mapper.map([0.02, 0.0, 0.0, 0.0, 0.0]),
         [0.001, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
+
+
+def test_commissioning_deadbands_preserve_isolated_joint_mapping() -> None:
+    deadbands = np.array([0.15, 0.02, 0.01, 0.025, 0.15])
+    mapper = CadRestMapper(
+        rest_q=np.zeros(6),
+        signs=np.array([1.0, 1.0, -1.0, -1.0, -1.0]),
+        scales=np.full(5, 0.10),
+        source_deadband_rad=deadbands,
+        command_limits=np.tile([-1.0, 1.0], (6, 1)),
+    )
+    mapper.engage(np.zeros(5), np.zeros(6))
+    np.testing.assert_array_equal(mapper.map(deadbands * 0.99), np.zeros(6))
+
+    source_directions = np.array([1.0, 1.0, -1.0, -1.0, -1.0])
+    for joint in range(5):
+        source = np.zeros(5)
+        source[joint] = source_directions[joint] * (deadbands[joint] + 0.10)
+        expected = np.zeros(6)
+        expected[joint] = 0.01
+        np.testing.assert_allclose(mapper.map(source), expected, atol=1e-12)
 
 
 def test_angle_delta_uses_shortest_path_across_pi() -> None:

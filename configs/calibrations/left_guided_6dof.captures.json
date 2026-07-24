@@ -1,5 +1,5 @@
 {
-  "output": "/home/apurv/Codex-Complete/322/VR Teleoperation Stack for Robot Manipulation-WXAI/aurel-vr-teleop-widowxai/configs/calibrations/left_guided_6dof.json",
+  "output": "configs/calibrations/left_guided_6dof.json",
   "captures": [
     {
       "gesture": "right",

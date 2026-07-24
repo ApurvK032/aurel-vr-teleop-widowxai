@@ -34,6 +34,8 @@ TELEMETRY_COLUMNS = [
     "command_pre_send_wait_ms",
     "mailbox_overwrite_count",
     "reconnect_generation",
+    "quest_hand",
+    "quest_mapping_mode",
     "quest_grip",
     "quest_trigger",
     "stream_fresh",
@@ -83,7 +85,8 @@ class TelemetryLogger:
     def __init__(self, label: str, config: dict[str, Any], output_dir: str | Path = "runs") -> None:
         safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-") or "run"
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.run_dir = resolve_project_path(output_dir) / f"{stamp}_{safe_label}"
+        day = time.strftime("%Y-%m-%d")
+        self.run_dir = resolve_project_path(output_dir) / day / f"{stamp}_{safe_label}"
         self.run_dir.mkdir(parents=True, exist_ok=False)
         self.csv_path = self.run_dir / "telemetry.csv"
         self._handle = self.csv_path.open("w", newline="", encoding="utf-8")

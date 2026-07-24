@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from widowxai_quest_teleop.pose_filter import ControllerPoseFilter, pose_ema, pose_filter_alphas
 from widowxai_quest_teleop.sample_buffer import LatestValueMailbox
@@ -48,6 +49,8 @@ def test_transport_parses_webxr_xyzw_as_internal_wxyz() -> None:
     np.testing.assert_allclose(sample.controller_pose.quaternion_wxyz, [1, 0, 0, 0])
     assert sample.sequence == 7
     assert sample.reconnect_generation == 3
+    assert sample.hand == "left"
+    assert sample.mapping_mode == "real"
     np.testing.assert_allclose(sample.head_quaternion_wxyz, [1, 0, 0, 0])
 
 
@@ -71,6 +74,82 @@ def test_transport_prefers_session_locked_operator_heading() -> None:
     )
 
     np.testing.assert_allclose(sample.head_quaternion_wxyz, [1, 0, 0, 0])
+
+
+def test_transport_selects_right_controller() -> None:
+    sample = parse_pose_message(
+        {
+            "type": "pose",
+            "sequence": 10,
+            "capture_monotonic_ms": 10.0,
+            "capture_epoch_ms": 20.0,
+            "send_monotonic_ms": 10.1,
+            "left": {
+                "position": [-1, -2, -3],
+                "orientation_xyzw": [0, 0, 0, 1],
+                "grip": 0,
+                "trigger": 0,
+            },
+            "right": {
+                "position": [1, 2, 3],
+                "orientation_xyzw": [0, 0, 0, 1],
+                "grip": 0.8,
+                "trigger": 0.4,
+            },
+        },
+        hand="right",
+    )
+
+    np.testing.assert_allclose(sample.controller_pose.position, [1, 2, 3])
+    assert sample.grip == 0.8
+    assert sample.trigger == 0.4
+
+
+def test_transport_auto_selects_and_mirrors_webxr_pose() -> None:
+    half_sqrt = np.sqrt(0.5)
+    sample = parse_pose_message(
+        {
+            "type": "pose",
+            "selected_hand": "right",
+            "mapping_mode": "mirror",
+            "sequence": 11,
+            "capture_monotonic_ms": 10.0,
+            "capture_epoch_ms": 20.0,
+            "send_monotonic_ms": 10.1,
+            "right": {
+                "position": [1, 2, 3],
+                "orientation_xyzw": [0, half_sqrt, 0, half_sqrt],
+                "grip": 0.7,
+                "trigger": 0.3,
+            },
+        },
+        hand=None,
+        mapping_mode=None,
+    )
+
+    assert sample.hand == "right"
+    assert sample.mapping_mode == "mirror"
+    np.testing.assert_allclose(sample.controller_pose.position, [-1, 2, 3])
+    np.testing.assert_allclose(
+        sample.controller_pose.quaternion_wxyz,
+        [half_sqrt, 0, -half_sqrt, 0],
+    )
+
+
+def test_transport_rejects_page_selection_mismatch() -> None:
+    payload = {
+        "type": "pose",
+        "selected_hand": "right",
+        "mapping_mode": "mirror",
+        "right": {
+            "position": [0, 0, 0],
+            "orientation_xyzw": [0, 0, 0, 1],
+        },
+    }
+    with pytest.raises(ValueError, match="expected left"):
+        parse_pose_message(payload, hand="left", mapping_mode="mirror")
+    with pytest.raises(ValueError, match="expected real"):
+        parse_pose_message(payload, hand="right", mapping_mode="real")
 
 
 def test_watchdog_requires_fresh_window_and_times_out() -> None:

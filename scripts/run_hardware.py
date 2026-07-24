@@ -8,7 +8,12 @@ import time
 import numpy as np
 
 from widowxai_quest_teleop.clutch import ClutchController
-from widowxai_quest_teleop.config import load_config
+from widowxai_quest_teleop.config import (
+    TASK_PROFILE_NAMES,
+    apply_task_profile,
+    load_config,
+    task_profile_for_quest_selection,
+)
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.gripper import trigger_to_gripper_position
 from widowxai_quest_teleop.hardware import (
@@ -41,6 +46,10 @@ def validate_hardware_config(config: dict) -> None:
 
     hardware = config["hardware"]
     quest = config["quest"]
+    if quest.get("hand", "left") not in ("left", "right"):
+        raise HardwareSafetyError("quest.hand must be 'left' or 'right'")
+    if quest.get("mapping_mode", "real") not in ("real", "mirror"):
+        raise HardwareSafetyError("quest.mapping_mode must be 'real' or 'mirror'")
     control = config["control"]
     update_mode = control.get("update_mode", "fixed_rate")
     if update_mode not in ("fixed_rate", "quest_synchronized"):
@@ -56,7 +65,6 @@ def validate_hardware_config(config: dict) -> None:
         "quest.stale_timeout_s": quest["stale_timeout_s"],
         "hardware.startup_ramp_duration_s": hardware["startup_ramp_duration_s"],
         "hardware.startup_ramp_rate_hz": hardware["startup_ramp_rate_hz"],
-        "hardware.max_demo_duration_s": hardware["max_demo_duration_s"],
         "hardware.max_feedback_error_rad": hardware["max_feedback_error_rad"],
         "hardware.max_gripper_feedback_error_m": hardware["max_gripper_feedback_error_m"],
         "hardware.feedback_check_rate_hz": hardware["feedback_check_rate_hz"],
@@ -70,6 +78,21 @@ def validate_hardware_config(config: dict) -> None:
         value = float(raw)
         if not np.isfinite(value) or value <= 0.0:
             raise HardwareSafetyError(f"{name} must be finite and positive")
+
+    if "max_demo_duration_s" not in hardware:
+        raise HardwareSafetyError(
+            "hardware.max_demo_duration_s must be a positive number or explicit null"
+        )
+    max_demo_duration = hardware["max_demo_duration_s"]
+    if max_demo_duration is not None:
+        max_demo_duration_value = float(max_demo_duration)
+        if (
+            not np.isfinite(max_demo_duration_value)
+            or max_demo_duration_value <= 0.0
+        ):
+            raise HardwareSafetyError(
+                "hardware.max_demo_duration_s must be positive or explicit null"
+            )
 
     nonnegative_values = {
         "control.minimum_command_interval_s": control.get("minimum_command_interval_s", 0.0),
@@ -245,20 +268,65 @@ def validate_live_hardware_timing(config: dict) -> None:
         raise HardwareSafetyError("live demo requires explicit gripper velocity and acceleration limits")
 
 
-def wait_for_released_quest(receiver: QuestReceiver, timeout_s: float, stale_timeout_s: float) -> None:
+def require_quest_selection(
+    sample,
+    expected_hand: str,
+    expected_mapping_mode: str,
+) -> None:
+    """Fail closed if the page no longer reports the preflight-locked input."""
+
+    if sample.hand != expected_hand or sample.mapping_mode != expected_mapping_mode:
+        raise HardwareSafetyError(
+            "Quest page selection changed after preflight: "
+            f"received {sample.hand}/{sample.mapping_mode}, "
+            f"locked {expected_hand}/{expected_mapping_mode}; "
+            "keep grip released and restart the run"
+        )
+
+
+def wait_for_released_quest(
+    receiver: QuestReceiver,
+    timeout_s: float,
+    stale_timeout_s: float,
+    *,
+    expected_hand: str | None = None,
+    expected_mapping_mode: str | None = None,
+):
     """Require live tracking and a released deadman before any position mode is enabled."""
+
+    if (expected_hand is None) != (expected_mapping_mode is None):
+        raise ValueError("expected hand and mapping mode must be provided together")
     deadline = time.perf_counter() + float(timeout_s)
     watchdog = FreshSequenceWatchdog(stale_timeout_s, fresh_samples_to_recover=3)
     while time.perf_counter() < deadline:
         sample, _ = receiver.mailbox.take_latest()
         if sample is not None:
+            if expected_hand is not None and expected_mapping_mode is not None:
+                require_quest_selection(
+                    sample,
+                    expected_hand,
+                    expected_mapping_mode,
+                )
             freshness = watchdog.observe(sample)
             if freshness.fresh and sample.grip < 0.65:
-                return
+                return sample
         time.sleep(0.01)
     raise HardwareSafetyError(
         "Quest preflight failed: enter WebXR, keep the grip released, and provide fresh tracking"
     )
+
+
+def resolve_demo_duration(hardware: dict, requested_duration_s: float) -> float:
+    """Resolve an optional operator duration against an optional config cap."""
+
+    requested = float(requested_duration_s)
+    if not np.isfinite(requested) or requested < 0.0:
+        raise ValueError("requested duration must be finite and nonnegative")
+    configured = hardware["max_demo_duration_s"]
+    duration_limit = np.inf if configured is None else float(configured)
+    if requested == 0.0:
+        return duration_limit
+    return min(requested, duration_limit)
 
 
 def ramp_to_home(backend, gate: CommandGate, start, home_q: np.ndarray, config: dict) -> None:
@@ -482,18 +550,51 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fail-closed WidowXAI physical demo")
     parser.add_argument("--config", default="configs/safe_demo_30pct.yaml")
     parser.add_argument("--live", action="store_true", help="use the official Trossen hardware driver")
-    parser.add_argument("--robot-ip", help="required for --live; never inferred")
+    parser.add_argument(
+        "--robot-ip",
+        help="override hardware.robot_ip from the selected config",
+    )
     parser.add_argument(
         "--end-effector-profile",
         choices=tuple(END_EFFECTOR_PROFILE_TO_VARIANT),
-        help="required for --live; legacy_1_8 reproduces the previously working arm setup",
+        help=(
+            "override the selected config; legacy_1_8 reproduces the "
+            "previously working arm setup"
+        ),
     )
     parser.add_argument("--confirm-live", default="", help="must equal LIVE-WIDOWXAI-<robot-ip>")
-    parser.add_argument("--duration", type=float, default=0.0, help="0 uses the configured demo limit")
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=0.0,
+        help=(
+            "optional positive run duration; 0 uses the configured limit, "
+            "or runs until Ctrl+C when that limit is null"
+        ),
+    )
     parser.add_argument("--label", default="widowxai-hardware-demo")
+    parser.add_argument(
+        "--task-profile",
+        choices=TASK_PROFILE_NAMES,
+        help="strictly select one fixed hand and Behind/Mirror candidate",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
+    page_locked_task_profile = bool(
+        config["project"].get("page_locked_task_profile", False)
+    )
+    if (
+        config["project"].get("require_task_profile", False)
+        and not args.task_profile
+        and not page_locked_task_profile
+    ):
+        raise SystemExit("this configuration requires --task-profile")
+    if args.task_profile:
+        try:
+            apply_task_profile(config, args.task_profile)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(f"invalid task profile: {exc}") from None
     hardware = config["hardware"]
     control = config["control"]
     if not hardware.get("enabled") or not hardware.get("require_explicit_enable"):
@@ -503,8 +604,8 @@ def main() -> None:
     except (KeyError, TypeError, ValueError, HardwareSafetyError) as exc:
         raise SystemExit(f"invalid hardware safety configuration: {exc}") from None
     controller_filter = ControllerPoseFilter(control)
-    if not np.isfinite(args.duration):
-        raise SystemExit("--duration must be finite")
+    if not np.isfinite(args.duration) or args.duration < 0.0:
+        raise SystemExit("--duration must be finite and nonnegative")
 
     model = WidowXAIModel(config["model"]["xml_path"])
     solver = DecoupledIK.from_config(model, config)
@@ -547,16 +648,12 @@ def main() -> None:
 
     quest = config["quest"]
     control_gripper = bool(hardware.get("control_gripper", True))
-    mapper = ClutchPoseMapper(
-        quest["calibration"],
-        translation_scale=quest["translation_scale"],
-        rotation_scale=quest["rotation_scale"],
-        position_reach_limit_m=quest["position_reach_limit_m"],
-        rotation_reach_limit_rad=quest["rotation_reach_limit_rad"],
+    select_profile_from_page = page_locked_task_profile and not args.task_profile
+    receiver = QuestReceiver(
+        quest["websocket_url"],
+        hand=None if select_profile_from_page else quest.get("hand", "left"),
+        mapping_mode=None if select_profile_from_page else quest.get("mapping_mode", "real"),
     )
-    clutch = ClutchController(mapper)
-    watchdog = FreshSequenceWatchdog(quest["stale_timeout_s"], quest["fresh_samples_to_recover"])
-    receiver = QuestReceiver(quest["websocket_url"])
 
     connected = False
     motion_started = False
@@ -569,7 +666,50 @@ def main() -> None:
                 raise HardwareSafetyError(str(exc)) from None
         receiver.start()
         print("preflight: waiting for fresh Quest tracking with grip released")
-        wait_for_released_quest(receiver, 10.0, quest["stale_timeout_s"])
+        preflight_sample = wait_for_released_quest(
+            receiver,
+            10.0,
+            quest["stale_timeout_s"],
+        )
+        if select_profile_from_page:
+            try:
+                selected_profile = task_profile_for_quest_selection(
+                    preflight_sample.hand,
+                    preflight_sample.mapping_mode,
+                )
+                apply_task_profile(config, selected_profile)
+                validate_hardware_config(config)
+                if args.live:
+                    validate_live_hardware_timing(config)
+            except (KeyError, TypeError, ValueError, HardwareSafetyError) as exc:
+                raise HardwareSafetyError(
+                    f"could not lock the page-selected task profile: {exc}"
+                ) from None
+            quest = config["quest"]
+            print(
+                "preflight: page selected "
+                f"{preflight_sample.hand}/{preflight_sample.mapping_mode}; "
+                f"locked task profile {selected_profile}"
+            )
+        selected_hand = quest.get("hand", "left")
+        selected_mapping_mode = quest.get("mapping_mode", "real")
+        require_quest_selection(
+            preflight_sample,
+            selected_hand,
+            selected_mapping_mode,
+        )
+        mapper = ClutchPoseMapper(
+            quest["calibration"],
+            translation_scale=quest["translation_scale"],
+            rotation_scale=quest["rotation_scale"],
+            position_reach_limit_m=quest["position_reach_limit_m"],
+            rotation_reach_limit_rad=quest["rotation_reach_limit_rad"],
+        )
+        clutch = ClutchController(mapper)
+        watchdog = FreshSequenceWatchdog(
+            quest["stale_timeout_s"],
+            quest["fresh_samples_to_recover"],
+        )
         state = backend.connect()
         connected = True
         print(
@@ -620,8 +760,17 @@ def main() -> None:
             raise HardwareSafetyError("arm did not reach home within the feedback limit")
         if control_gripper:
             settled = open_gripper_at_home(backend, model, settled, home_q, config)
-        print("home reached: keep grip released; hold left grip when ready to teleoperate")
-        wait_for_released_quest(receiver, 10.0, quest["stale_timeout_s"])
+        print(
+            "home reached: keep grip released; "
+            f"hold {selected_hand} grip when ready to teleoperate"
+        )
+        wait_for_released_quest(
+            receiver,
+            10.0,
+            quest["stale_timeout_s"],
+            expected_hand=selected_hand,
+            expected_mapping_mode=selected_mapping_mode,
+        )
 
         gripper_command = (
             float(hardware["gripper_open_m"])
@@ -686,8 +835,7 @@ def main() -> None:
         command_spacing_stage = configured_command_spacing_stage(control)
         feedback_stride = max(1, round(loop_hz / float(hardware["feedback_check_rate_hz"])))
         feedback_period = 1.0 / float(hardware["feedback_check_rate_hz"])
-        duration_limit = float(hardware["max_demo_duration_s"])
-        duration = duration_limit if args.duration <= 0.0 else min(float(args.duration), duration_limit)
+        duration = resolve_demo_duration(hardware, args.duration)
         started = time.perf_counter()
         next_tick_s = started
         next_feedback_s = started
@@ -713,12 +861,18 @@ def main() -> None:
             if quest_synchronized
             else f"{loop_hz:g} Hz commands"
         )
+        runtime_scope = (
+            "no duration deadline; Ctrl+C stops"
+            if np.isinf(duration)
+            else f"{duration:g} s maximum runtime"
+        )
         print(
             f"{mode}: {command_cadence}, {hardware['command_goal_time_s'] * 1000:g} ms "
             f"driver horizon, {output_scope}, configured pose scale and motion limits, "
             f"velocity feedforward "
             f"{'enabled' if arm_feedforward_filter is not None else 'disabled'}, "
-            "left grip is the deadman"
+            f"{selected_hand} grip is the deadman, "
+            f"{selected_mapping_mode} mapping, {runtime_scope}"
         )
         with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
             while time.perf_counter() - started < duration:
@@ -751,6 +905,11 @@ def main() -> None:
                     sample, _ = receiver.mailbox.take_latest()
                 control_consume_ns = time.perf_counter_ns()
                 if sample is not None:
+                    require_quest_selection(
+                        sample,
+                        selected_hand,
+                        selected_mapping_mode,
+                    )
                     last_sample = sample
                     freshness = watchdog.observe(sample)
                 else:
@@ -946,6 +1105,8 @@ def main() -> None:
                     command_pre_send_wait_ms=pre_send_wait_s * 1000.0,
                     mailbox_overwrite_count=receiver.mailbox.overwrite_count,
                     reconnect_generation="" if last_sample is None else last_sample.reconnect_generation,
+                    quest_hand="" if last_sample is None else last_sample.hand,
+                    quest_mapping_mode="" if last_sample is None else last_sample.mapping_mode,
                     quest_grip="" if last_sample is None else last_sample.grip,
                     quest_trigger="" if last_sample is None else last_sample.trigger,
                     stream_fresh=freshness.fresh,

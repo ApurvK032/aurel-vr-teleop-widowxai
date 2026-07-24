@@ -10,7 +10,29 @@
   <main>
     <p class="eyebrow">SIMULATION FIRST</p>
     <h1>WidowXAI Quest Teleop</h1>
-    <p>This page streams the left Meta Quest controller to the Windows workstation. Grip is the clutch; trigger is reserved for the gripper.</p>
+    <p id="controller-description">This page streams the selected Meta Quest controller. Grip is the clutch; trigger controls the gripper.</p>
+    <section class="input-settings" aria-labelledby="input-settings-title">
+      <div>
+        <p class="section-title" id="input-settings-title">Controller input</p>
+        <p class="field-help">Choose before entering passthrough. The selection is remembered on this headset.</p>
+      </div>
+      <label>
+        Controller
+        <select id="hand-select">
+          <option value="left">Left hand</option>
+          <option value="right">Right hand</option>
+        </select>
+      </label>
+      <label>
+        Robot motion
+        <select id="mapping-mode-select">
+          <option value="real">Behind / Parallel — matched motion</option>
+          <option value="mirror">Mirrored — flip left/right, front/back, screw, nod-no</option>
+        </select>
+      </label>
+      <button id="apply-input" class="secondary" type="button">Apply input</button>
+      <p id="input-selection" class="selection-summary"></p>
+    </section>
     <div class="status"><span id="dot"></span><span id="status">Connecting to relay…</span></div>
     <div class="actions">
       <button id="enter" disabled>Checking XR support…</button>
@@ -24,7 +46,7 @@
       <div><dt>Wrist pivot</dt><dd id="calibration">Not calibrated</dd></div>
       <div><dt>USB page</dt><dd>http://localhost:8443/</dd></div>
     </dl>
-    <p class="warning">This interface does not enable physical-arm output. Validate motion in MuJoCo first.</p>
+    <p class="warning">This interface does not enable physical-arm output. The four saved motion profiles use reduced gain and fixed reach limits. Their full-stroke trigger/gripper behavior remains pending acceptance on the arm.</p>
   </main>
   <canvas id="xr-canvas"></canvas>
   <script src="/client.js"></script>

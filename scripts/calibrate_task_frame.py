@@ -77,12 +77,30 @@ class SampleStream:
     def __init__(self, receiver: QuestReceiver) -> None:
         self.receiver = receiver
         self.generation = 0
+        self.expected_hand: str | None = None
+        self.expected_mapping_mode: str | None = None
+
+    def lock_selection(self, sample: QuestSample) -> None:
+        self.expected_hand = sample.hand
+        self.expected_mapping_mode = sample.mapping_mode
 
     def next(self, timeout_s: float = 0.5) -> QuestSample | None:
         sample, self.generation = self.receiver.mailbox.wait_take_latest(
             self.generation,
             timeout_s,
         )
+        if (
+            sample is not None
+            and self.expected_hand is not None
+            and (
+                sample.hand != self.expected_hand
+                or sample.mapping_mode != self.expected_mapping_mode
+            )
+        ):
+            raise ValueError(
+                "Quest hand/mapping selection changed during calibration; "
+                "restart with one fixed selection"
+            )
         return sample
 
 
@@ -121,7 +139,7 @@ def wait_for_release(stream: SampleStream, timeout_s: float = 20.0) -> None:
         released = released + 1 if sample.grip <= 0.35 else 0
         if released >= 5:
             return
-    raise TimeoutError("left grip was not released")
+    raise TimeoutError("selected controller grip was not released")
 
 
 def wait_for_press(stream: SampleStream, timeout_s: float = 30.0) -> QuestSample:
@@ -130,7 +148,7 @@ def wait_for_press(stream: SampleStream, timeout_s: float = 30.0) -> QuestSample
         sample = stream.next()
         if sample is not None and sample.grip >= 0.70:
             return sample
-    raise TimeoutError("left grip was not pressed")
+    raise TimeoutError("selected controller grip was not pressed")
 
 
 def capture_gesture(
@@ -139,12 +157,16 @@ def capture_gesture(
     gesture: Gesture,
     repeat: int,
     repeats: int,
+    hand: str,
 ) -> tuple[np.ndarray, dict[str, object]]:
     while True:
         wait_for_release(stream)
         prompt = f"{gesture.instruction} — capture {repeat}/{repeats}"
         print(f"\n{prompt}")
-        print("Hold still at the start, squeeze and HOLD left grip, wait for the pulse, move, hold the endpoint, release grip.")
+        print(
+            f"Hold still at the start, squeeze and HOLD {hand} grip, wait for the pulse, "
+            "move, hold the endpoint, release grip."
+        )
         publish_prompt(receiver, prompt)
         wait_for_press(stream)
 
@@ -259,12 +281,22 @@ def main() -> None:
     if output.exists() and not args.overwrite:
         raise SystemExit(f"output already exists: {output}; pass --overwrite to replace it")
     config = load_config(args.config)
-    receiver = QuestReceiver(config["quest"]["websocket_url"])
+    receiver = QuestReceiver(
+        config["quest"]["websocket_url"],
+        hand=None,
+        mapping_mode=None,
+    )
     stream = SampleStream(receiver)
     receiver.start()
     print("QUEST-ONLY CALIBRATION: this process does not import a robot driver or send arm commands.")
     print("Stop every run_hardware.py process. Face the direction that should be robot-forward.")
-    print("Six gestures will be captured twice. Reverse directions follow automatically.")
+    print("Choose the controller and Real/Mirror mode on http://localhost:8443/.")
+    print("Six gestures will be captured twice.")
+
+    hand = "page-selected"
+    mapping_mode = "page-selected"
+    saved_hand: str | None = None
+    saved_mapping_mode: str | None = None
 
     position_observed: list[np.ndarray] = []
     position_desired: list[np.ndarray] = []
@@ -273,12 +305,42 @@ def main() -> None:
     captures: list[dict[str, object]] = []
     capture_log = output.with_suffix(".captures.json")
 
+    if capture_log.exists():
+        saved = json.loads(capture_log.read_text(encoding="utf-8"))
+        saved_hand = saved.get("hand")
+        saved_mapping_mode = saved.get("mapping_mode")
+        saved_output = resolve_project_path(saved.get("output", output))
+        if saved_output != output:
+            raise SystemExit(
+                f"capture log belongs to a different output: {saved_output}"
+            )
+        captures = list(saved.get("captures", []))
+        position_observed = [
+            np.asarray(value, dtype=float) for value in saved.get("position_observed", [])
+        ]
+        position_desired = [
+            np.asarray(value, dtype=float) for value in saved.get("position_desired", [])
+        ]
+        rotation_observed = [
+            np.asarray(value, dtype=float) for value in saved.get("rotation_observed", [])
+        ]
+        rotation_desired = [
+            np.asarray(value, dtype=float) for value in saved.get("rotation_desired", [])
+        ]
+        print(
+            "Resuming saved calibration: "
+            f"{len(position_observed)} translation and "
+            f"{len(rotation_observed)} rotation captures already accepted."
+        )
+
     def save_capture_log() -> None:
         capture_log.parent.mkdir(parents=True, exist_ok=True)
         capture_log.write_text(
             json.dumps(
                 {
                     "output": str(output),
+                    "hand": hand,
+                    "mapping_mode": mapping_mode,
                     "captures": captures,
                     "position_observed": [value.tolist() for value in position_observed],
                     "position_desired": [value.tolist() for value in position_desired],
@@ -292,8 +354,15 @@ def main() -> None:
         )
 
     def repeated_capture(gesture: Gesture) -> list[tuple[np.ndarray, dict[str, object]]]:
-        accepted: list[tuple[np.ndarray, dict[str, object]]] = []
-        for repeat in range(1, args.repeats + 1):
+        accepted = [
+            (np.asarray(item["observed_operator_vector"], dtype=float), item)
+            for item in captures
+            if item.get("gesture") == gesture.key and item.get("kind") == gesture.kind
+        ]
+        existing_count = len(accepted)
+        if existing_count > args.repeats:
+            raise ValueError(f"capture log has too many {gesture.key} samples")
+        for repeat in range(existing_count + 1, args.repeats + 1):
             while True:
                 observed, details = capture_gesture(
                     stream,
@@ -301,6 +370,7 @@ def main() -> None:
                     gesture,
                     repeat,
                     args.repeats,
+                    hand,
                 )
                 if accepted:
                     previous = accepted[0][0] / np.linalg.norm(accepted[0][0])
@@ -317,12 +387,29 @@ def main() -> None:
                     details["repeat_axis_separation_deg"] = separation
                 accepted.append((observed, details))
                 break
-        return accepted
+        return accepted[existing_count:]
 
     try:
         first = stream.next(10.0)
         if first is None:
             raise SystemExit("no fresh Quest poses arrived; start localhost and enter passthrough first")
+        stream.lock_selection(first)
+        hand = first.hand
+        mapping_mode = first.mapping_mode
+        if saved_hand is not None and saved_hand != hand:
+            raise ValueError(
+                f"capture log uses {saved_hand} controller, page selected {hand}"
+            )
+        if (
+            saved_mapping_mode is not None
+            and saved_mapping_mode != mapping_mode
+        ):
+            raise ValueError(
+                "capture log uses mapping mode "
+                f"{saved_mapping_mode}, page selected {mapping_mode}"
+            )
+        print(f"Selected input: {hand} controller, {mapping_mode} mapping.")
+        task_frame_determinant = -1 if mapping_mode == "mirror" else 1
         translation_gestures = [gesture for gesture in GESTURES if gesture.kind == "translation"]
         rotation_gestures = [gesture for gesture in GESTURES if gesture.kind == "rotation"]
         for gesture in translation_gestures:
@@ -335,6 +422,7 @@ def main() -> None:
         position_matrix, position_quality = fit_direction_map(
             np.asarray(position_observed),
             np.asarray(position_desired),
+            mapping_determinant=task_frame_determinant,
         )
         if position_quality["max_axis_error_deg"] > 25.0:
             raise ValueError("translation calibration is inconsistent; capture log was preserved")
@@ -345,8 +433,15 @@ def main() -> None:
         )
 
         for gesture in rotation_gestures:
-            accepted: list[tuple[np.ndarray, dict[str, object]]] = []
-            for repeat in range(1, args.repeats + 1):
+            accepted = [
+                (np.asarray(item["observed_operator_vector"], dtype=float), item)
+                for item in captures
+                if item.get("gesture") == gesture.key and item.get("kind") == gesture.kind
+            ]
+            existing_count = len(accepted)
+            if existing_count > args.repeats:
+                raise ValueError(f"capture log has too many {gesture.key} samples")
+            for repeat in range(existing_count + 1, args.repeats + 1):
                 while True:
                     observed, details = capture_gesture(
                         stream,
@@ -354,11 +449,13 @@ def main() -> None:
                         gesture,
                         repeat,
                         args.repeats,
+                        hand,
                     )
                     quality = direction_map_quality(
                         position_matrix,
                         observed.reshape(1, 3),
                         gesture.desired_robot_axis.reshape(1, 3),
+                        axial_vectors=True,
                     )
                     axis_error = float(quality["max_axis_error_deg"])
                     if axis_error > 30.0:
@@ -382,7 +479,7 @@ def main() -> None:
                     details["linked_task_axis_error_deg"] = axis_error
                     accepted.append((observed, details))
                     break
-            for observed, details in accepted:
+            for observed, details in accepted[existing_count:]:
                 captures.append(details)
                 rotation_observed.append(observed)
                 rotation_desired.append(gesture.desired_robot_axis)
@@ -396,7 +493,12 @@ def main() -> None:
             rotation_desired=np.asarray(rotation_desired),
             captures=captures,
             link_rotation_to_position=True,
+            position_mapping_determinant=task_frame_determinant,
         )
+        document["quest_input"] = {
+            "hand": hand,
+            "mapping_mode": mapping_mode,
+        }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         position_quality = document["guided_calibration"]["position_quality"]

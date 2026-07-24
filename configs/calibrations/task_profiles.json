@@ -1,0 +1,53 @@
+{
+  "name": "quest_task_profiles",
+  "status": "right_mirror_accepted_at_50pct_others_pending",
+  "profiles": {
+    "left_behind": "configs/calibrations/left_behind_all_motions_20260723_candidate.json",
+    "left_mirror": "configs/calibrations/left_mirror_all_motions_20260723_candidate.json",
+    "right_behind": "configs/calibrations/right_behind_all_motions_20260723_candidate.json",
+    "right_mirror": "configs/calibrations/right_mirror_20260723_accepted.json"
+  },
+  "profile_status": {
+    "left_behind": "pending_physical_validation",
+    "left_mirror": "pending_physical_validation",
+    "right_behind": "pending_physical_validation",
+    "right_mirror": "accepted_by_operator_at_50pct"
+  },
+  "page_selection": {
+    "Left + Behind / Parallel": "left_behind",
+    "Left + Mirrored": "left_mirror",
+    "Right + Behind / Parallel": "right_behind",
+    "Right + Mirrored": "right_mirror",
+    "lock_policy": "first_fresh_grip_released_sample_before_arm_connection"
+  },
+  "transport_values": {
+    "behind_parallel": "real",
+    "mirrored": "mirror"
+  },
+  "semantic_rules": {
+    "behind": {
+      "task_position_signs": [1.0, 1.0, 1.0],
+      "task_rotation_signs": [1.0, 1.0, 1.0]
+    },
+    "mirror": {
+      "definition": "operator_defined_mirrored_motion",
+      "task_position_signs": [-1.0, -1.0, 1.0],
+      "task_rotation_signs": [-1.0, 1.0, -1.0],
+      "motions": {
+        "left_right_translation": "flipped",
+        "up_down_translation": "unchanged",
+        "forward_backward_translation": "flipped",
+        "screw_rotation": "flipped",
+        "nod_yes_rotation": "unchanged",
+        "nod_no_rotation": "flipped"
+      }
+    }
+  },
+  "notes": [
+    "Each hand retains its own calibrated task frame and wrist-offset storage.",
+    "Right/Behind has an algebraically equivalent reduced-gain physical acceptance; the canonical Right/Real transport variant remains a test candidate.",
+    "Right/Mirror was accepted by the operator at 50% task scale with full gripper control on 2026-07-23.",
+    "Left/Behind, Left/Mirror, and Right/Behind remain pending at the current 50% scale.",
+    "The tagged left Step-3 profile remains the rollback baseline."
+  ]
+}

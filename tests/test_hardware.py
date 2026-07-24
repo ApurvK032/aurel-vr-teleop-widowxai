@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,13 +9,20 @@ from scripts.run_hardware import (
     make_startup_command_gate,
     open_gripper_at_home,
     ramp_to_home,
+    require_quest_selection,
+    resolve_demo_duration,
     return_to_rest,
     teleop_gripper_limits,
     validate_hardware_config,
     validate_live_hardware_timing,
     validate_time_aligned_feedback,
 )
-from widowxai_quest_teleop.config import load_config
+from widowxai_quest_teleop.config import (
+    TASK_PROFILE_NAMES,
+    apply_task_profile,
+    load_config,
+    task_profile_for_quest_selection,
+)
 from widowxai_quest_teleop.hardware import (
     CommandGate,
     HardwareState,
@@ -71,6 +80,211 @@ def test_hardware_config_rejects_nonfinite_or_nonpositive_safety_values(
     config[section][key] = value
     with pytest.raises((HardwareSafetyError, ValueError, OverflowError)):
         validate_hardware_config(config)
+
+
+def test_hardware_config_rejects_unknown_quest_input_selection() -> None:
+    config = load_config("configs/hardware_demo.yaml")
+    config["quest"]["hand"] = "either"
+    with pytest.raises(HardwareSafetyError, match="quest.hand"):
+        validate_hardware_config(config)
+
+    config = load_config("configs/hardware_demo.yaml")
+    config["quest"]["mapping_mode"] = "automatic"
+    with pytest.raises(HardwareSafetyError, match="quest.mapping_mode"):
+        validate_hardware_config(config)
+
+
+def test_right_real_axis_validation_profile_is_conservative_and_pending() -> None:
+    baseline = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
+    config = load_config("configs/right_real_axis_validation_hardware.yaml")
+    validate_hardware_config(config)
+    validate_live_hardware_timing(config)
+
+    assert config["quest"]["hand"] == "right"
+    assert config["quest"]["mapping_mode"] == "real"
+    assert config["quest"]["translation_scale"] < baseline["quest"]["translation_scale"]
+    assert config["quest"]["rotation_scale"] < baseline["quest"]["rotation_scale"]
+    assert config["hardware"]["control_gripper"] is False
+    assert config["hardware"]["max_demo_duration_s"] == pytest.approx(15.0)
+    assert config["control"] == baseline["control"]
+    assert config["ik"] == baseline["ik"]
+    assert config["hardware"]["command_goal_time_s"] == baseline["hardware"][
+        "command_goal_time_s"
+    ]
+    assert config["hardware"]["arm_velocity_feedforward"] == baseline["hardware"][
+        "arm_velocity_feedforward"
+    ]
+
+    calibration = json.loads(
+        Path(config["quest"]["calibration"]).read_text(encoding="utf-8")
+    )
+    validation = calibration["physical_axis_validation"]
+    assert validation["status"] == "pending_not_accepted"
+    assert validation["stable_left_baseline_unchanged"] is True
+    assert set(validation["motions"]) == {
+        "right",
+        "up",
+        "forward",
+        "screw_clockwise",
+        "nod_yes_down",
+        "nod_no_left",
+    }
+    assert all(
+        motion["status"] == "pending"
+        for motion in validation["motions"].values()
+    )
+    for key in ("position_matrix", "rotation_matrix"):
+        matrix = np.asarray(calibration[key], dtype=float)
+        np.testing.assert_allclose(matrix.T @ matrix, np.eye(3), atol=1e-9)
+        assert np.linalg.det(matrix) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_right_mirror_axis_validation_profiles_are_isolated_and_pending() -> None:
+    baseline = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
+    hardware = load_config("configs/right_mirror_axis_validation_hardware.yaml")
+    simulation = load_config("configs/right_mirror_axis_validation_mujoco.yaml")
+    validate_hardware_config(hardware)
+    validate_live_hardware_timing(hardware)
+    validate_hardware_config(simulation)
+
+    assert hardware["quest"]["hand"] == "right"
+    assert hardware["quest"]["mapping_mode"] == "mirror"
+    assert hardware["quest"] == simulation["quest"]
+    assert hardware["control"] == simulation["control"] == baseline["control"]
+    assert hardware["ik"] == simulation["ik"] == baseline["ik"]
+    assert hardware["hardware"]["enabled"] is True
+    assert simulation["hardware"]["enabled"] is False
+    assert hardware["hardware"]["control_gripper"] is False
+    assert simulation["hardware"]["control_gripper"] is False
+    assert hardware["quest"]["translation_scale"] < baseline["quest"]["translation_scale"]
+    assert hardware["quest"]["rotation_scale"] < baseline["quest"]["rotation_scale"]
+
+    calibration = json.loads(
+        Path(hardware["quest"]["calibration"]).read_text(encoding="utf-8")
+    )
+    acceptance = calibration["physical_axis_acceptance"]
+    assert acceptance["status"] == "accepted_by_operator"
+    assert calibration["task_mapping_semantics"]["name"] == "behind"
+    assert not calibration["task_mapping_semantics"]["mirror_semantics_validated"]
+    assert acceptance["derivation"]["task_frame_determinant"] == pytest.approx(-1.0)
+    assert set(acceptance["motions"].values()) == {"passed"}
+    assert acceptance["telemetry"]["run_count"] == 6
+    assert acceptance["telemetry"]["total_rows"] == 8099
+    assert acceptance["telemetry"]["total_ik_failures"] == 0
+    assert acceptance["stable_left_baseline_unchanged"] is True
+
+
+def test_quest_50pct_profile_requires_and_applies_fixed_profiles() -> None:
+    base = load_config("configs/quest_50pct_hardware.yaml")
+    step3 = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
+    article = load_config("configs/baseline.yaml")
+    assert base["project"]["page_locked_task_profile"] is True
+    assert base["hardware"]["control_gripper"] is True
+    assert base["hardware"]["max_demo_duration_s"] is None
+    for key in ("translation_scale", "rotation_scale"):
+        assert base["quest"][key] == pytest.approx(0.50 * article["quest"][key])
+    for key in ("position_reach_limit_m", "rotation_reach_limit_rad"):
+        assert base["quest"][key] == pytest.approx(0.50 * article["quest"][key])
+    assert base["hardware"]["gripper_open_m"] == step3["hardware"]["gripper_open_m"]
+    assert base["hardware"]["gripper_min_demo_m"] == step3["hardware"][
+        "gripper_min_demo_m"
+    ]
+    assert base["hardware"]["rest_gripper_m"] == step3["hardware"]["rest_gripper_m"]
+    assert base["hardware"]["max_gripper_delta_m"] == step3["hardware"][
+        "max_gripper_delta_m"
+    ]
+    assert base["control"]["gripper_command_limits"] == step3["control"][
+        "gripper_command_limits"
+    ]
+
+    expected = {
+        "left_behind": ("left", "real", "behind"),
+        "left_mirror": ("left", "mirror", "mirror"),
+        "right_behind": ("right", "real", "behind"),
+        "right_mirror": ("right", "mirror", "mirror"),
+    }
+    assert set(TASK_PROFILE_NAMES) == set(expected)
+    for profile_name, (hand, mapping_mode, semantics) in expected.items():
+        config = load_config("configs/quest_50pct_hardware.yaml")
+        apply_task_profile(config, profile_name)
+        validate_hardware_config(config)
+        validate_live_hardware_timing(config)
+        assert config["quest"]["hand"] == hand
+        assert config["quest"]["mapping_mode"] == mapping_mode
+        assert config["_task_profile"]["semantics"] == semantics
+        assert profile_name in config["project"]["mode"]
+        calibration = json.loads(
+            Path(config["quest"]["calibration"]).read_text(encoding="utf-8")
+        )
+        expected_status = (
+            "accepted_by_operator_at_50pct"
+            if profile_name == "right_mirror"
+            else "candidate_pending_physical_validation"
+        )
+        assert calibration["task_mapping_semantics"]["status"] == expected_status
+
+
+def test_demo_duration_supports_explicit_uncapped_profile() -> None:
+    uncapped = {"max_demo_duration_s": None}
+    assert np.isinf(resolve_demo_duration(uncapped, 0.0))
+    assert resolve_demo_duration(uncapped, 30.0) == pytest.approx(30.0)
+
+    capped = {"max_demo_duration_s": 15.0}
+    assert resolve_demo_duration(capped, 0.0) == pytest.approx(15.0)
+    assert resolve_demo_duration(capped, 30.0) == pytest.approx(15.0)
+
+    with pytest.raises(ValueError, match="nonnegative"):
+        resolve_demo_duration(uncapped, -1.0)
+    with pytest.raises(ValueError, match="finite"):
+        resolve_demo_duration(uncapped, np.inf)
+
+
+def test_hardware_config_accepts_explicit_uncapped_duration_only() -> None:
+    config = load_config("configs/quest_50pct_hardware.yaml")
+    validate_hardware_config(config)
+
+    config["hardware"]["max_demo_duration_s"] = 0.0
+    with pytest.raises(HardwareSafetyError, match="positive or explicit null"):
+        validate_hardware_config(config)
+
+    del config["hardware"]["max_demo_duration_s"]
+    with pytest.raises(HardwareSafetyError, match="positive number or explicit null"):
+        validate_hardware_config(config)
+
+
+@pytest.mark.parametrize(
+    ("hand", "mapping_mode", "expected"),
+    [
+        ("left", "real", "left_behind"),
+        ("left", "mirror", "left_mirror"),
+        ("right", "real", "right_behind"),
+        ("right", "mirror", "right_mirror"),
+    ],
+)
+def test_page_selection_resolves_all_four_task_profiles(
+    hand, mapping_mode, expected
+) -> None:
+    assert task_profile_for_quest_selection(hand, mapping_mode) == expected
+
+
+def test_page_selection_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="hand"):
+        task_profile_for_quest_selection("either", "real")
+    with pytest.raises(ValueError, match="mapping mode"):
+        task_profile_for_quest_selection("left", "automatic")
+
+
+def test_hardware_rejects_selection_change_after_preflight() -> None:
+    locked = SimpleNamespace(hand="right", mapping_mode="mirror")
+    require_quest_selection(locked, "right", "mirror")
+
+    changed_hand = SimpleNamespace(hand="left", mapping_mode="mirror")
+    with pytest.raises(HardwareSafetyError, match="changed after preflight"):
+        require_quest_selection(changed_hand, "right", "mirror")
+
+    changed_mode = SimpleNamespace(hand="right", mapping_mode="real")
+    with pytest.raises(HardwareSafetyError, match="changed after preflight"):
+        require_quest_selection(changed_mode, "right", "mirror")
 
 
 def test_command_gate_rejects_nonfinite_caps_and_margin() -> None:
