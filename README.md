@@ -25,7 +25,8 @@ latency telemetry.
 | MuJoCo on Windows and Ubuntu | Working |
 | One physical WidowXAI on Ubuntu | Working |
 | Automatic rest → home → rest | Working |
-| Two-arm operation | Planned, not implemented |
+| Bimanual WebXR capture, dual-arm MuJoCo, coordinated runtime | Working |
+| Two-arm physical operation | Implemented, blocked pending per-arm calibration acceptance |
 
 The current single-arm profile is
 [`configs/quest_50pct_hardware.yaml`](configs/quest_50pct_hardware.yaml).
@@ -119,21 +120,43 @@ repository contains only compact publishable data:
 - [`results/README.md`](results/README.md) — measured versus estimated latency;
 - [`scripts/organize_runs.py`](scripts/organize_runs.py) — local run organizer.
 
-## Two-arm extension
+## Two arms (bimanual)
 
-The current runtime controls exactly one arm. Do not attempt bimanual operation
-by launching two independent hardware processes.
+Both Quest controllers are captured in one timestamped WebXR frame, each drives
+its own arm through its own calibration, and both arms are solved and screened
+for cross-arm collision in **one** MuJoCo scene before either command is sent.
+The single-arm page, profile, and tests are unchanged and remain the rollback
+path.
 
-The current Hand and Behind/Mirrored controls select one controller for the
-single arm; they are not a two-arm interface. A two-arm implementation must
-capture both controllers in the same WebXR frame, use an independent accepted
-calibration for each arm, solve both arms in one coordinated runtime, and check
-cross-arm collisions in one MuJoCo scene.
+Select **Bimanual** on the Quest page, then run the simulation:
 
-The complete prerequisites, code map, proposed configuration, staged
-implementation workflow, safety validation, and definition of done are in
-[`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md). It is a development
-guide; no physical two-arm launcher exists yet.
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
+  --config configs/dual_widowxai.yaml
+```
+
+No-motion preflight, including simultaneous and one-arm-moving path screening
+in the combined scene:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/preflight_dual_hardware.py \
+  --config configs/dual_widowxai.yaml
+```
+
+`scripts/run_dual_hardware.py` implements the full physical lifecycle
+(lockstep rest→home ramp, per-arm grippers, coordinated fault hold, sequential
+return to rest). **Live two-arm output is currently blocked by configuration**:
+it requires an explicitly accepted calibration for each arm, and both per-hand
+Behind/Parallel calibrations are still candidates. It also requires its own
+`LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token; the single-arm
+`LIVE-WIDOWXAI-<ip>` token can never enable two arms.
+
+Base transforms in `configs/dual_widowxai.yaml` encode a 300 mm separation and
+are **placeholders**. Measure both arm bases against one shared world frame
+before any physical work — every cross-arm collision result depends on them.
+
+Architecture, staged validation, and the definition of done are in
+[`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md).
 
 ## Repository map
 

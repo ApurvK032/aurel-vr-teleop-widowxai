@@ -1,12 +1,58 @@
 # Dual-arm extension
 
-The current project controls one WidowXAI. This document defines a safe path to
-two arms without duplicating two single-arm processes and hoping they remain
-synchronized.
+This document defines a safe path to two arms without duplicating two
+single-arm processes and hoping they remain synchronized.
 
-> **Current status:** this is an implementation and validation guide, not a
-> working two-arm launcher. The repository does not currently provide a
-> copy-paste command that can move two physical arms.
+> **Current status: implemented; live output gated.**
+>
+> The bimanual transport, dual-arm configuration schema, combined MuJoCo scene,
+> per-arm runtime, coordinated controller, dual telemetry, and all three
+> launchers exist and are exercised by the offline suite. What remains before
+> two physical arms may move is operational, not structural:
+>
+> 1. **measure both arm base transforms** — the shipped values are placeholders
+>    encoding a 300 mm separation, and every cross-arm result depends on them;
+> 2. **physically accept a calibration for each arm** — both per-hand
+>    Behind/Parallel calibrations are still candidates, and
+>    `require_live_dual_arm_config` refuses live output until each is accepted;
+> 3. **work through the validation sequence below** on the real bench.
+>
+> Live output additionally requires the dual token
+> `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`.
+
+## Implemented components
+
+| Concern | Where |
+|---|---|
+| Bimanual WebXR capture (schema v2) | `src/widowxai_quest_teleop/web/client.js`, `index.html` |
+| Bimanual sample types | `types.py` — `ControllerSample`, `BimanualQuestSample` |
+| Packet parsing and one-mailbox receiver | `transport.py` — `parse_bimanual_pose_message`, `BimanualQuestReceiver` |
+| Per-arm config with fail-closed rules | `config.py` — `parse_dual_arm_config`, `require_live_dual_arm_config` |
+| Combined two-arm scene and collision | `dual_arm_model.py` — `DualArmCollisionModel` |
+| Reusable per-arm pipeline | `arm_runtime.py` — `ArmRuntime` |
+| Consume-once / solve-both / screen / send | `dual_arm_coordinator.py` — `DualArmCoordinator` |
+| Dual telemetry with skew and fault state | `telemetry.py` — `DUAL_ARM_TELEMETRY_COLUMNS` |
+| Launchers | `scripts/run_dual_sim.py`, `preflight_dual_hardware.py`, `run_dual_hardware.py` |
+| Profile | `configs/dual_widowxai.yaml` |
+| Tests | `tests/test_dual_arm_transport.py`, `tests/test_dual_arm_safety.py` |
+
+### Notes recorded during implementation
+
+The two arms each own a `WidowXAIModel`. `DecoupledIK` uses the model's
+`MjData` as scratch between `fk` and `jacobian`, so two solvers sharing one
+model would silently corrupt each other's Jacobians.
+
+The combined scene is built with `MjSpec.attach(child, prefix=..., frame=...)`
+from two copies of `wxai_follower.xml`. The gripper-carriage self-collision
+whitelist had to become prefix-aware; the unprefixed literal would stop
+matching and report every closed gripper as a self-collision.
+
+`mj_geomDistance` in mujoco 3.8.1 returns exactly `0.0` for some box-box pairs
+once `distmax` exceeds the true separation — reproduced on this model with two
+link boxes 0.31 m apart. The clearance check keeps its search cutoff just above
+the configured margin and raises every result to a bounding-sphere lower bound,
+which is provable and can only under-report clearance. Contact detection via
+`mj_forward` is unaffected and remains the primary gate.
 
 ## What exists today
 
@@ -232,36 +278,35 @@ after both Quest profiles and both complete startup paths pass offline checks.
 Do not weaken the current single-arm tests while extracting reusable classes.
 Add dual-arm tests alongside them.
 
-## Intended entry points
+## Entry points
 
-After implementation, provide separate entry points rather than changing the
-meaning of the current single-arm commands:
-
-```text
-scripts/run_dual_sim.py
-scripts/preflight_dual_hardware.py
-scripts/run_dual_hardware.py
-configs/dual_widowxai.yaml
-```
-
-The intended workflow is:
+Separate entry points; the single-arm commands are unchanged.
 
 ```bash
-# Future command: this script does not exist yet.
 env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
   --config configs/dual_widowxai.yaml
 ```
 
+No-motion offline checks. Add `--contact-arms` to additionally open a
+read-only driver session to each controller without enabling position mode:
+
 ```bash
-# Future no-motion command: this script does not exist yet.
 env -u PYTHONPATH .venv-arm18/bin/python scripts/preflight_dual_hardware.py \
   --config configs/dual_widowxai.yaml
 ```
 
-Only after simulation and no-motion acceptance should a live launcher be
-implemented. It must require a new confirmation token containing both verified
-arm IPs. The existing single-arm `LIVE-WIDOWXAI-<IP>` token must never enable
-two arms.
+The live launcher requires a confirmation token containing both verified arm
+IPs. The single-arm `LIVE-WIDOWXAI-<IP>` token never enables two arms:
+
+```bash
+# Only with explicit operator authorization, both calibrations accepted,
+# and measured base transforms in the profile.
+env -u PYTHONPATH .venv-arm18/bin/python scripts/run_dual_hardware.py \
+  --config configs/dual_widowxai.yaml --live \
+  --confirm-live LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>
+```
+
+Omitting `--live` runs the complete lifecycle against two dry-run backends.
 
 ## Validation sequence
 

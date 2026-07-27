@@ -46,10 +46,14 @@ def validate_hardware_config(config: dict) -> None:
 
     hardware = config["hardware"]
     quest = config["quest"]
-    if quest.get("hand", "left") not in ("left", "right"):
-        raise HardwareSafetyError("quest.hand must be 'left' or 'right'")
-    if quest.get("mapping_mode", "real") not in ("real", "mirror"):
-        raise HardwareSafetyError("quest.mapping_mode must be 'real' or 'mirror'")
+    # A bimanual profile carries its hand and mapping per arm under `arms`,
+    # validated by config.parse_dual_arm_config. Everything below this point is
+    # shared control/hardware safety and applies to both profiles.
+    if str(quest.get("mode", "")).lower() != "bimanual":
+        if quest.get("hand", "left") not in ("left", "right"):
+            raise HardwareSafetyError("quest.hand must be 'left' or 'right'")
+        if quest.get("mapping_mode", "real") not in ("real", "mirror"):
+            raise HardwareSafetyError("quest.mapping_mode must be 'real' or 'mirror'")
     control = config["control"]
     update_mode = control.get("update_mode", "fixed_rate")
     if update_mode not in ("fixed_rate", "quest_synchronized"):

@@ -9,11 +9,13 @@ import numpy as np
 from websockets.sync.client import connect
 
 from .sample_buffer import LatestValueMailbox
-from .types import Pose, QuestSample
+from .types import BimanualQuestSample, ControllerSample, Pose, QuestSample
 
 
 QUEST_HANDS = ("left", "right")
 QUEST_MAPPING_MODES = ("real", "mirror")
+BIMANUAL_SCHEMA_VERSION = 2
+BIMANUAL_MESSAGE_TYPE = "bimanual_pose"
 
 
 def _validated_selection(
@@ -54,6 +56,18 @@ def _mirror_webxr_pose(
     mirrored_orientation = orientation_xyzw.copy()
     mirrored_orientation[1:3] *= -1.0
     return mirrored_position, mirrored_orientation
+
+
+def _head_quaternion_wxyz(payload: dict[str, Any]) -> np.ndarray | None:
+    # Prefer the session-locked operator frame from new clients. Older clients
+    # and recordings still work through the live-head fallback.
+    head = payload.get("operator_head")
+    if not isinstance(head, dict) or "orientation_xyzw" not in head:
+        head = payload.get("head")
+    if not isinstance(head, dict) or "orientation_xyzw" not in head:
+        return None
+    head_xyzw = np.asarray(head["orientation_xyzw"], dtype=float).reshape(4)
+    return np.array([head_xyzw[3], head_xyzw[0], head_xyzw[1], head_xyzw[2]])
 
 
 def parse_pose_message(
@@ -100,15 +114,7 @@ def parse_pose_message(
         position,
         np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=float),
     )
-    head_wxyz = None
-    # Prefer the session-locked operator frame from new clients. Older clients
-    # and recordings still work through the live-head fallback.
-    head = payload.get("operator_head")
-    if not isinstance(head, dict) or "orientation_xyzw" not in head:
-        head = payload.get("head")
-    if isinstance(head, dict) and "orientation_xyzw" in head:
-        head_xyzw = np.asarray(head["orientation_xyzw"], dtype=float).reshape(4)
-        head_wxyz = np.array([head_xyzw[3], head_xyzw[0], head_xyzw[1], head_xyzw[2]])
+    head_wxyz = _head_quaternion_wxyz(payload)
     return QuestSample(
         sequence=int(payload["sequence"]),
         capture_monotonic_ms=float(payload["capture_monotonic_ms"]),
@@ -126,26 +132,121 @@ def parse_pose_message(
     )
 
 
-class QuestReceiver:
-    """Reconnecting WebSocket subscriber backed by a capacity-one mailbox."""
+def _parse_bimanual_controller(
+    payload: Any,
+    hand: str,
+    expected_mapping_mode: str | None,
+) -> ControllerSample:
+    """Parse one hand of a bimanual frame, representing loss explicitly."""
 
-    def __init__(
-        self,
-        websocket_url: str,
-        *,
-        hand: str | None = "left",
-        mapping_mode: str | None = "real",
-    ) -> None:
-        selected_hand = _validated_selection(hand, QUEST_HANDS, "hand")
-        selected_mapping_mode = _validated_selection(
-            mapping_mode,
+    if payload is None or not isinstance(payload, dict):
+        # An absent controller block is untracked, not an error. The other arm
+        # must keep running when one controller sleeps or leaves the volume.
+        return ControllerSample(
+            hand=hand,
+            tracked=False,
+            mapping_mode=expected_mapping_mode or "real",
+        )
+    mapping_mode = _validated_selection(
+        str(payload.get("mapping_mode", expected_mapping_mode or "real")),
+        QUEST_MAPPING_MODES,
+        "mapping mode",
+    )
+    assert mapping_mode is not None
+    if expected_mapping_mode is not None and mapping_mode != expected_mapping_mode:
+        raise ValueError(
+            f"Quest page selected {hand} mapping mode {mapping_mode}, "
+            f"expected {expected_mapping_mode}"
+        )
+    if not bool(payload.get("tracked", True)):
+        return ControllerSample(hand=hand, tracked=False, mapping_mode=mapping_mode)
+    position = np.asarray(payload["position"], dtype=float).reshape(3)
+    xyzw = np.asarray(payload["orientation_xyzw"], dtype=float).reshape(4)
+    if not np.all(np.isfinite(position)) or not np.all(np.isfinite(xyzw)):
+        raise ValueError(f"{hand} controller pose is non-finite")
+    if mapping_mode == "mirror":
+        position, xyzw = _mirror_webxr_pose(position, xyzw)
+    return ControllerSample(
+        hand=hand,
+        tracked=True,
+        mapping_mode=mapping_mode,
+        controller_pose=Pose(
+            position,
+            np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=float),
+        ),
+        grip=float(payload.get("grip", 0.0)),
+        trigger=float(payload.get("trigger", 0.0)),
+    )
+
+
+def parse_bimanual_pose_message(
+    raw: str | dict[str, Any],
+    *,
+    mapping_modes: dict[str, str] | None = None,
+) -> BimanualQuestSample:
+    """Parse one schema-v2 frame carrying both controllers.
+
+    The whole packet is rejected when its shared sequence or timestamps are
+    invalid, because those are what align the two arms in time. Per-controller
+    tracking loss is represented on the controller instead.
+    """
+
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    if payload.get("type") != BIMANUAL_MESSAGE_TYPE:
+        raise ValueError("not a bimanual pose message")
+    schema_version = int(payload.get("schema_version", 0))
+    if schema_version != BIMANUAL_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported bimanual schema version {schema_version}; "
+            f"expected {BIMANUAL_SCHEMA_VERSION}"
+        )
+    sequence = int(payload["sequence"])
+    capture_monotonic_ms = float(payload["capture_monotonic_ms"])
+    capture_epoch_ms = float(payload["capture_epoch_ms"])
+    send_monotonic_ms = float(payload["send_monotonic_ms"])
+    shared_timestamps = (capture_monotonic_ms, capture_epoch_ms, send_monotonic_ms)
+    if sequence < 0 or not all(np.isfinite(value) for value in shared_timestamps):
+        raise ValueError("bimanual packet has an invalid shared sequence or timestamp")
+
+    expected_modes = dict(mapping_modes or {})
+    controllers: dict[str, ControllerSample] = {}
+    for hand in QUEST_HANDS:
+        expected_mode = _validated_selection(
+            expected_modes.get(hand),
             QUEST_MAPPING_MODES,
             "mapping mode",
         )
+        controllers[hand] = _parse_bimanual_controller(
+            payload.get(hand),
+            hand,
+            expected_mode,
+        )
+    return BimanualQuestSample(
+        sequence=sequence,
+        capture_monotonic_ms=capture_monotonic_ms,
+        capture_epoch_ms=capture_epoch_ms,
+        send_monotonic_ms=send_monotonic_ms,
+        pc_arrival_monotonic_ns=time.perf_counter_ns(),
+        pc_arrival_epoch_ns=time.time_ns(),
+        reconnect_generation=int(payload.get("reconnect_generation", 0)),
+        controllers=controllers,
+        head_quaternion_wxyz=_head_quaternion_wxyz(payload),
+    )
+
+
+class _MailboxWebSocketReceiver:
+    """Reconnecting WebSocket subscriber backed by a capacity-one mailbox.
+
+    Subclasses supply only ``_parse``. The socket, reconnect, and mailbox
+    behaviour stays identical between the single-arm and bimanual paths so the
+    validated stale/reconnect semantics are not reimplemented twice.
+    """
+
+    _THREAD_NAME = "quest-websocket"
+
+    def __init__(self, websocket_url: str) -> None:
         self.websocket_url = websocket_url
-        self.hand = selected_hand
-        self.mapping_mode = selected_mapping_mode
-        self.mailbox: LatestValueMailbox[QuestSample] = LatestValueMailbox()
+        self.mailbox: LatestValueMailbox[Any] = LatestValueMailbox()
         self.bad_messages = 0
         self.reconnects = 0
         self.last_error: str | None = None
@@ -154,11 +255,14 @@ class QuestReceiver:
         self._websocket_lock = threading.Lock()
         self._websocket = None
 
+    def _parse(self, raw: str) -> Any:
+        raise NotImplementedError
+
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="quest-websocket", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=self._THREAD_NAME, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -200,12 +304,14 @@ class QuestReceiver:
                             if self._stop.is_set():
                                 break
                             try:
-                                sample = parse_pose_message(
-                                    raw,
-                                    self.hand,
-                                    self.mapping_mode,
-                                )
-                            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                                sample = self._parse(raw)
+                            except (
+                                ValueError,
+                                KeyError,
+                                TypeError,
+                                AssertionError,
+                                json.JSONDecodeError,
+                            ):
                                 self.bad_messages += 1
                                 continue
                             self.mailbox.publish(sample)
@@ -216,3 +322,55 @@ class QuestReceiver:
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 self._stop.wait(0.5)
+
+
+class QuestReceiver(_MailboxWebSocketReceiver):
+    """Single-arm subscriber: one selected controller per packet."""
+
+    def __init__(
+        self,
+        websocket_url: str,
+        *,
+        hand: str | None = "left",
+        mapping_mode: str | None = "real",
+    ) -> None:
+        super().__init__(websocket_url)
+        self.hand = _validated_selection(hand, QUEST_HANDS, "hand")
+        self.mapping_mode = _validated_selection(
+            mapping_mode,
+            QUEST_MAPPING_MODES,
+            "mapping mode",
+        )
+        self.mailbox: LatestValueMailbox[QuestSample] = LatestValueMailbox()
+
+    def _parse(self, raw: str) -> QuestSample:
+        return parse_pose_message(raw, self.hand, self.mapping_mode)
+
+
+class BimanualQuestReceiver(_MailboxWebSocketReceiver):
+    """Bimanual subscriber: both controllers arrive in one capacity-one sample.
+
+    One mailbox is deliberate. Two mailboxes would let the arms drift apart in
+    time and would make "which controller does this arm's command belong to"
+    a timing question instead of a packet question.
+    """
+
+    _THREAD_NAME = "quest-bimanual-websocket"
+
+    def __init__(
+        self,
+        websocket_url: str,
+        *,
+        mapping_modes: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(websocket_url)
+        modes = dict(mapping_modes or {})
+        for hand, mode in modes.items():
+            if hand not in QUEST_HANDS:
+                raise ValueError(f"unsupported Quest hand: {hand}")
+            _validated_selection(mode, QUEST_MAPPING_MODES, "mapping mode")
+        self.mapping_modes = modes
+        self.mailbox: LatestValueMailbox[BimanualQuestSample] = LatestValueMailbox()
+
+    def _parse(self, raw: str) -> BimanualQuestSample:
+        return parse_bimanual_pose_message(raw, mapping_modes=self.mapping_modes)

@@ -75,3 +75,18 @@ without first testing it in MuJoCo.
 Change one control variable per experiment. Never weaken physical joint,
 collision, stale-stream, feedback, driver-version, or shutdown gates merely to
 make a run launch.
+
+## Dual-arm profile
+
+`dual_widowxai.yaml` is the bimanual profile: both Quest controllers, two arms,
+one coordinated runtime. It replaces the single `quest` and `hardware.robot_ip`
+blocks with per-arm `arms.left` / `arms.right` entries plus a `safety` block,
+and it is validated by `config.parse_dual_arm_config` rather than by the
+single-arm loader.
+
+Its base transforms are placeholders encoding a 300 mm separation. Measure both
+arm bases against one shared world frame before any physical dual-arm work.
+
+Live two-arm output additionally requires an explicitly accepted calibration
+for each arm and the dual `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token. Do
+not use the single-arm profiles or token for two arms.
