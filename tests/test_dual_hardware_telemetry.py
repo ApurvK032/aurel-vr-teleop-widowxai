@@ -32,7 +32,9 @@ def channel(side: str, q_feedback: np.ndarray | None = None) -> dual_hardware.Ar
 
 
 def test_feedback_telemetry_uses_actual_encoder_read_time(monkeypatch) -> None:
-    left = channel("left", np.full(6, 0.01))
+    left = channel("left", np.full(6, 0.026))
+    left.command_history = TimeAlignedCommandHistory(np.zeros(6), 9.95, 0.025)
+    left.command_history.append(9.98, np.full(6, 0.03))
     arm = SimpleNamespace(q_feedback=np.zeros(6), gripper_feedback_m=0.0)
     monkeypatch.setattr(dual_hardware.time, "perf_counter_ns", lambda: 10_000_000_000)
 
@@ -47,9 +49,12 @@ def test_feedback_telemetry_uses_actual_encoder_read_time(monkeypatch) -> None:
     assert left.feedback_read_monotonic_ns == 10_000_000_000
     assert left.feedback_sample_fresh is True
     assert left.next_feedback_s == pytest.approx(10.02)
-    np.testing.assert_allclose(left.q_feedback_reference, np.zeros(6))
-    np.testing.assert_allclose(left.q_feedback_error, np.full(6, 0.01))
-    np.testing.assert_allclose(arm.q_feedback, np.full(6, 0.01))
+    assert left.feedback_reference_state == "interpolated"
+    assert left.feedback_newest_command_age_ms == pytest.approx(20.0)
+    assert left.feedback_history_span_ms == pytest.approx(30.0)
+    np.testing.assert_allclose(left.q_feedback_reference, np.full(6, 0.025))
+    np.testing.assert_allclose(left.q_feedback_error, np.full(6, 0.001))
+    np.testing.assert_allclose(arm.q_feedback, np.full(6, 0.026))
 
 
 def test_no_encoder_read_is_not_reported_as_fresh() -> None:
@@ -64,6 +69,9 @@ def test_no_encoder_read_is_not_reported_as_fresh() -> None:
     for side in ("left", "right"):
         assert record[f"{side}_feedback_read_monotonic_ns"] == 0
         assert record[f"{side}_feedback_sample_fresh"] is False
+        assert record[f"{side}_feedback_reference_state"] == ""
+        assert record[f"{side}_feedback_newest_command_age_ms"] is None
+        assert record[f"{side}_feedback_history_span_ms"] is None
 
 
 def test_feedback_scheduler_marks_only_the_arm_actually_read(monkeypatch) -> None:
@@ -134,6 +142,8 @@ def test_tracking_fault_sample_is_retained_for_the_stop_row(monkeypatch) -> None
     assert "joint 2 time-aligned tracking error" in record["fault_reason"]
     assert record["left_feedback_sample_fresh"] is True
     assert record["left_feedback_read_monotonic_ns"] == 10_000_000_000
+    assert record["left_feedback_reference_state"] == "clamped-to-newest"
+    assert record["left_feedback_newest_command_age_ms"] == pytest.approx(1000.0)
     np.testing.assert_allclose(record["left_q_feedback_reference"], np.zeros(6))
     np.testing.assert_allclose(record["left_q_feedback_error"], measured)
     # Validation stops at the first fault, so the untouched arm must not claim

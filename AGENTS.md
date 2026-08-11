@@ -878,6 +878,33 @@ changing another variable.
   feedback reference and hold behavior offline, especially the distinction
   between an interpolated reference and one clamped to the newest command.
 
+### 2026-08-11 — Milestone 3: reference-state and hold evidence
+
+- Each arm's fresh feedback row now records
+  `feedback_reference_state`, `feedback_newest_command_age_ms`, and
+  `feedback_history_span_ms`. The state is one of `clamped-to-oldest`,
+  `interpolated`, or `clamped-to-newest`; rows without an encoder read leave
+  these per-read fields empty. This makes an error trend diagnosable before it
+  crosses the stop threshold and avoids relying only on exception prose.
+- Offline tests pin the 25 ms delayed-reference boundaries and prove an
+  interpolated example: a read at 10.000 s resolves to the 9.975 s command
+  between commands sent at 9.950 and 9.980 s. They also prove that a fault at
+  the newest boundary reports `clamped-to-newest`.
+- Hold semantics are now regression-pinned: losing one controller's tracking
+  preserves that arm's last committed command while the other arm remains
+  independently usable; a combined collision or external arm fault rejects
+  the entire tick and preserves both arms' last committed commands. No rejected
+  proposal becomes authoritative.
+- The 25 ms delay and 0.08 rad stop threshold were not changed. A future
+  physical fault row can now show whether joint 2 was compared with a genuine
+  interpolated command or with the final newest command after the stream went
+  idle.
+- Offline verification: focused dual/hardware suite `105 passed`; full `.venv`
+  suite `210 passed`; full no-arm `.venv-arm18` suite `210 passed`. No Quest or
+  arm was connected and no physical command was sent.
+- Next milestone: replace placeholder base transforms with measured bench
+  geometry before treating any cross-arm clearance result as physical evidence.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.

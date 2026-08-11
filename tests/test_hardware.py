@@ -326,9 +326,15 @@ def test_time_aligned_feedback_interpolates_delayed_command_and_detects_stall() 
     )
     np.testing.assert_allclose(reference, np.full(6, 0.015))
     np.testing.assert_allclose(error, np.full(6, 0.001))
+    assert history.clamp_state(10.024) == "clamped-to-oldest"
+    assert history.clamp_state(10.040) == "interpolated"
+    assert history.clamp_state(10.045) == "clamped-to-newest"
 
     stalled = np.zeros(6)
-    with pytest.raises(HardwareSafetyError, match="joint 0 time-aligned tracking error"):
+    with pytest.raises(
+        HardwareSafetyError,
+        match="joint 0 time-aligned tracking error.*reference clamped-to-newest",
+    ):
         validate_time_aligned_feedback(stalled, 10.045, history, 0.01)
 
 

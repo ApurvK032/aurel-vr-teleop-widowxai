@@ -72,6 +72,9 @@ class ArmChannel:
     send_epoch_ns: int = 0
     feedback_read_monotonic_ns: int = 0
     feedback_sample_fresh: bool = False
+    feedback_reference_state: str = ""
+    feedback_newest_command_age_ms: float | None = None
+    feedback_history_span_ms: float | None = None
     reached_rest: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -82,6 +85,9 @@ def reset_feedback_telemetry(channels: dict[str, ArmChannel]) -> None:
     for channel in channels.values():
         channel.feedback_read_monotonic_ns = 0
         channel.feedback_sample_fresh = False
+        channel.feedback_reference_state = ""
+        channel.feedback_newest_command_age_ms = None
+        channel.feedback_history_span_ms = None
 
 
 def read_and_validate_channel_feedback(
@@ -103,14 +109,22 @@ def read_and_validate_channel_feedback(
     # validate_time_aligned_feedback raises on the one sample that matters most.
     # Populate the channel first so the caller can write that sample before
     # re-raising the fail-closed exception.
-    channel.q_feedback_reference = channel.command_history.reference_at(read_time_s)
+    history = channel.command_history
+    channel.q_feedback_reference = history.reference_at(read_time_s)
     channel.q_feedback_error = feedback.q_arm - channel.q_feedback_reference
+    channel.feedback_reference_state = history.clamp_state(read_time_s)
+    channel.feedback_newest_command_age_ms = (
+        read_time_s - history.newest_time_s
+    ) * 1000.0
+    channel.feedback_history_span_ms = (
+        history.newest_time_s - history.oldest_time_s
+    ) * 1000.0
     channel.next_feedback_s = read_time_s + feedback_period
     try:
         validate_time_aligned_feedback(
             feedback.q_arm,
             read_time_s,
-            channel.command_history,
+            history,
             hardware["max_feedback_error_rad"],
         )
     except HardwareSafetyError as exc:
@@ -152,6 +166,11 @@ def add_feedback_telemetry(
         record[f"{side}_q_feedback_error"] = channel.q_feedback_error
         record[f"{side}_feedback_sample_fresh"] = channel.feedback_sample_fresh
         record[f"{side}_feedback_read_monotonic_ns"] = channel.feedback_read_monotonic_ns
+        record[f"{side}_feedback_reference_state"] = channel.feedback_reference_state
+        record[f"{side}_feedback_newest_command_age_ms"] = (
+            channel.feedback_newest_command_age_ms
+        )
+        record[f"{side}_feedback_history_span_ms"] = channel.feedback_history_span_ms
     if fault is not None:
         record["fault_reason"] = str(fault)
     return record

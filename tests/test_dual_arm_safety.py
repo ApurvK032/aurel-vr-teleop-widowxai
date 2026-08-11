@@ -554,6 +554,7 @@ def test_losing_one_controller_holds_only_that_arm(dual_config) -> None:
     for sequence in range(8):
         coordinator.step(bimanual_sample(sequence), limiter_dt=0.011)
 
+    left_committed = arms["left"].q_command.copy()
     tick = coordinator.step(bimanual_sample(8, left_tracked=False), limiter_dt=0.011)
 
     assert tick.proposals["left"].tracked is False
@@ -562,6 +563,8 @@ def test_losing_one_controller_holds_only_that_arm(dual_config) -> None:
     assert "left" in tick.held_sides
     assert "right" not in tick.held_sides
     assert tick.stream_lost is False
+    np.testing.assert_allclose(tick.proposals["left"].q_command, left_committed)
+    np.testing.assert_allclose(arms["left"].q_command, left_committed)
 
 
 def test_losing_the_shared_stream_holds_both_arms(dual_config) -> None:
@@ -607,6 +610,26 @@ def test_a_cross_arm_collision_rejects_both_arms_commands(dual_config) -> None:
         assert np.allclose(arms[side].q_command, committed[side]), (
             f"{side} arm advanced past a rejected combined state"
         )
+        assert arms[side].rejected_commands == 1
+
+
+def test_external_arm_fault_rejects_and_holds_both_commands(dual_config) -> None:
+    arms, _, coordinator = build_system(dual_config)
+    for sequence in range(8):
+        coordinator.step(bimanual_sample(sequence), limiter_dt=0.011)
+    committed = {side: arms[side].q_command.copy() for side in ("left", "right")}
+
+    tick = coordinator.step(
+        bimanual_sample(8),
+        limiter_dt=0.011,
+        external_fault="left driver feedback unavailable",
+    )
+
+    assert tick.accepted is False
+    assert tick.fault_reason == "left driver feedback unavailable"
+    assert set(tick.held_sides) == {"left", "right"}
+    for side in ("left", "right"):
+        np.testing.assert_allclose(arms[side].q_command, committed[side])
         assert arms[side].rejected_commands == 1
 
 
@@ -675,6 +698,9 @@ def test_dual_telemetry_declares_both_arms_and_skew() -> None:
         assert f"{side}_ik_status" in DUAL_ARM_TELEMETRY_COLUMNS
         assert f"{side}_tracked" in DUAL_ARM_TELEMETRY_COLUMNS
         assert f"{side}_stream_fresh" in DUAL_ARM_TELEMETRY_COLUMNS
+        assert f"{side}_feedback_reference_state" in DUAL_ARM_TELEMETRY_COLUMNS
+        assert f"{side}_feedback_newest_command_age_ms" in DUAL_ARM_TELEMETRY_COLUMNS
+        assert f"{side}_feedback_history_span_ms" in DUAL_ARM_TELEMETRY_COLUMNS
     assert "command_skew_ms" in DUAL_ARM_TELEMETRY_COLUMNS
     assert "cross_arm_collision" in DUAL_ARM_TELEMETRY_COLUMNS
     assert "coordinated_hold" in DUAL_ARM_TELEMETRY_COLUMNS
