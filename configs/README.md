@@ -108,7 +108,19 @@ env -u PYTHONPATH .venv/bin/python scripts/calibrate_task_frame.py \
   --simulation-only
 ```
 
-Repeat with `right` and a distinct output. These files are deliberately stamped
-`simulation_only` and are not physical acceptance evidence. Reference them only
-from a hardware-disabled MuJoCo profile; never replace the calibrations in
-`dual_widowxai.yaml` with them.
+The current MuJoCo profile is `dual_widowxai_mujoco_calibrated.yaml`. It uses the
+captured left file above and, at the owner's request, an explicitly documented
+identity transfer of that task frame for the right controller. The derived
+right file does not claim right-hand capture evidence. Both files are stamped
+`simulation_only`, and the profile sets both hardware gates false. Never replace
+the calibrations in `dual_widowxai.yaml` with them.
+
+Run the calibrated 500 mm tabletop scene with:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
+  --config configs/dual_widowxai_mujoco_calibrated.yaml \
+  --tabletop \
+  --inline-viewer \
+  --label dual-500mm-mujoco-calibrated
+```

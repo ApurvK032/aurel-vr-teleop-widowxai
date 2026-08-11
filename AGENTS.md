@@ -988,6 +988,47 @@ changing another variable.
   calibration files, and every physical launcher remain unchanged by this
   milestone.
 
+### 2026-08-11 — Milestone 7: calibrated dual MuJoCo mapping validated
+
+- The owner completed all twelve guided left-controller captures (right, up,
+  forward, screw-clockwise, nod-down, and nod-left, each twice). The resulting
+  proper task frame is
+  `configs/calibrations/left_behind_mujoco_20260811.json`: translation median
+  error 5.2 degrees / maximum 10.3 degrees and linked-rotation median 9.6
+  degrees / maximum 15.2 degrees. It remains explicitly `simulation_only`.
+- At the owner's request, no independent right-hand capture was performed.
+  `right_behind_mujoco_20260811_derived.json` uses the same matrix because both
+  `real` controllers are polar/axial deltas in one Quest world frame and both
+  MuJoCo arms have the same local task-axis convention. The file declares an
+  identity hand transfer, names its left source, has no right capture samples,
+  and remains explicitly `simulation_only`.
+- `configs/dual_widowxai_mujoco_calibrated.yaml` is the only profile referencing
+  these files. Both `hardware.enabled` and `hardware.require_explicit_enable`
+  are false, the physical dual profile is unchanged, and the conservative
+  0.45 gains / 0.075 m / 0.18 rad envelope was retained for signed-axis
+  validation.
+- The owner described both simulated arms as good and controllable. Evidence is
+  `runs/2026-08-11/20260811-181254_dual-500mm-mujoco-calibrated`: 10,211 rows
+  over 114.878 s at 88.877 Hz, every consumed Quest sequence unique, and zero
+  IK failures across 3,818 left-active and 3,849 right-active ticks. On
+  collision-free active ticks, position residual p95 was 3.8 mm left / 4.6 mm
+  right and orientation residual p95 was 0.00013 rad / 0.00028 rad.
+- Neither simulated arm approached a joint limit: minimum active margins were
+  0.315 rad left and 0.467 rad right. Motion shaping engaged briefly and as
+  intended (joint-velocity flags on 79 left and 138 right active ticks; one
+  right joint-jerk flag), without a stop. Command skew was 0.006 ms median,
+  0.020 ms p95, and 2.876 ms maximum, below the 10 ms configured bound.
+- Five deliberate arm-to-arm approaches generated 218
+  `cross-arm-clearance` rejections. Every collision row held both sides, and
+  both arms' commanded joints changed by exactly 0.0 rad from the pre-collision
+  command and throughout every rejection episode. No tabletop/environment
+  collision and no non-collision fault occurred.
+- Verification: focused calibration/dual suite `77 passed`; full `.venv` suite
+  `219 passed`; full no-arm `.venv-arm18` suite `219 passed`. This validates the
+  mapping, latest-state transport, IK, shaping, tabletop scene, and coordinated
+  rejection in MuJoCo. It does not validate encoder feedback timing, the joint-2
+  physical tracking fault fix, real base geometry, or any live driver behavior.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.

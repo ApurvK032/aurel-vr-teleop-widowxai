@@ -31,6 +31,7 @@ from widowxai_quest_teleop.types import Pose
 
 DUAL_CONFIG = "configs/dual_widowxai.yaml"
 MIRRORED_DUAL_CONFIG = "configs/dual_widowxai_mirrored.yaml"
+MUJOCO_CALIBRATED_DUAL_CONFIG = "configs/dual_widowxai_mujoco_calibrated.yaml"
 HOME_Q = np.array([0.0, 1.0471975512, 1.3089969390, -1.0471975512, 0.0, 0.0])
 REST_Q = np.zeros(6)
 
@@ -89,6 +90,21 @@ def test_shipped_dual_profile_loads_and_records_both_arms(dual_config) -> None:
     # Each arm uses a calibration measured for its own controller hand.
     assert "left" in arms["left"].calibration
     assert "right" in arms["right"].calibration
+
+
+def test_mujoco_calibrated_dual_profile_is_hardware_disabled() -> None:
+    config = load_config(MUJOCO_CALIBRATED_DUAL_CONFIG)
+    arms = parse_dual_arm_config(config)
+
+    assert not config["hardware"]["enabled"]
+    assert not config["hardware"]["require_explicit_enable"]
+    assert arms["left"].calibration_status == "simulation_only"
+    assert arms["right"].calibration_status == "simulation_only"
+    assert not arms["left"].calibration_accepted
+    assert not arms["right"].calibration_accepted
+    assert arms["left"].controller_hand == "left"
+    assert arms["right"].controller_hand == "right"
+    assert config["_dual_arm"]["base_separation_m"] == pytest.approx(0.50)
 
 
 def test_same_ip_on_both_arms_is_rejected(dual_config) -> None:

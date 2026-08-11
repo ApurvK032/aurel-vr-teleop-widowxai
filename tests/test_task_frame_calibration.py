@@ -148,6 +148,29 @@ def test_guided_mujoco_profile_is_linked_unshaped_and_hardware_disabled() -> Non
     assert not config["hardware"]["require_explicit_enable"]
 
 
+def test_dual_mujoco_right_frame_is_an_explicit_identity_hand_transfer() -> None:
+    left = json.loads(
+        resolve_project_path(
+            "configs/calibrations/left_behind_mujoco_20260811.json"
+        ).read_text(encoding="utf-8")
+    )
+    right = json.loads(
+        resolve_project_path(
+            "configs/calibrations/right_behind_mujoco_20260811_derived.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    np.testing.assert_allclose(right["position_matrix"], left["position_matrix"])
+    np.testing.assert_allclose(right["rotation_matrix"], left["rotation_matrix"])
+    assert left["quest_input"] == {"hand": "left", "mapping_mode": "real"}
+    assert right["quest_input"] == {"hand": "right", "mapping_mode": "real"}
+    assert right["derivation"]["method"].startswith("identity hand transfer")
+    assert not right["derivation"]["independent_right_hand_capture_performed"]
+    assert right["guided_calibration"]["captures"] == []
+    assert left["validation_scope"]["status"] == "simulation_only"
+    assert right["validation_scope"]["status"] == "simulation_only"
+
+
 def test_right_real_independent_rotation_calibration_preserves_translation() -> None:
     candidate = json.loads(
         resolve_project_path(
