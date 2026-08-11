@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from scripts.calibrate_task_frame import BimanualHandSampleStream
 from widowxai_quest_teleop.safety import FreshSequenceWatchdog
 from widowxai_quest_teleop.transport import (
     BIMANUAL_SCHEMA_VERSION,
@@ -205,6 +206,41 @@ def test_bimanual_receiver_counts_bad_messages_without_dying() -> None:
     assert receiver.mailbox.peek()[0] is not None
 
 
+def test_guided_calibration_projects_only_its_fixed_bimanual_hand() -> None:
+    receiver = BimanualQuestReceiver(
+        "ws://127.0.0.1:8443/ws", mapping_modes={"right": "real"}
+    )
+    stream = BimanualHandSampleStream(
+        receiver,
+        hand="right",
+        mapping_mode="real",
+    )
+    receiver.mailbox.publish(parse_bimanual_pose_message(bimanual_payload()))
+
+    sample = stream.next(0.0)
+
+    assert sample is not None
+    assert sample.hand == "right"
+    assert sample.grip == pytest.approx(0.1)
+    assert np.allclose(sample.controller_pose.position, [-1.0, 2.0, 3.0])
+
+
+def test_guided_calibration_does_not_reuse_an_untracked_bimanual_hand() -> None:
+    receiver = BimanualQuestReceiver(
+        "ws://127.0.0.1:8443/ws", mapping_modes={"left": "real"}
+    )
+    stream = BimanualHandSampleStream(
+        receiver,
+        hand="left",
+        mapping_mode="real",
+    )
+    payload = bimanual_payload()
+    payload["left"] = {"tracked": False, "mapping_mode": "real"}
+    receiver.mailbox.publish(parse_bimanual_pose_message(payload))
+
+    assert stream.next(0.0) is None
+
+
 # -- single-arm regression -------------------------------------------------
 
 
@@ -254,5 +290,7 @@ def test_quest_page_keeps_single_arm_controls_and_adds_bimanual_mode() -> None:
     # Both hands must be captured in one frame callback.
     assert "onBimanualFrame" in client
     assert "bimanualControllerBlock" in client
+    assert "message.hand" in client
+    assert "source.handedness === requestedHand" in client
     # Tracking loss is explicit, not an early return that drops the frame.
     assert "tracked: false" in client

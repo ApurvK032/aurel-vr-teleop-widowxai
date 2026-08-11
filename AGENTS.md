@@ -961,6 +961,33 @@ changing another variable.
   session. A USB connection alone creates the localhost tunnel but does not
   start controller pose transmission.
 
+### 2026-08-11 — Milestone 6: isolated bimanual MuJoCo calibration path
+
+- The operator reported that all controller directions in the provisional
+  dual MuJoCo run were wrong and requested a simulation-specific remap that
+  must not enter a real test. `scripts/calibrate_task_frame.py` can now project
+  one explicitly selected controller from schema-v2 `bimanual_pose` packets by
+  using `--bimanual-hand left|right --mapping-mode real|mirror`.
+- Bimanual calibration requires `--simulation-only`. Its output records
+  `validation_scope.status: simulation_only`,
+  `validation_scope.hardware_accepted: false`, and
+  `physical_validation.status: simulation_only`, so the existing live
+  calibration gate cannot infer hardware acceptance.
+- Explicit untracked packets are skipped; no stale controller pose can become
+  a calibration sample. Initial tracking and operator-start waits are long
+  enough for a supervised headset workflow. Calibration pulses carry the
+  target hand, and the web client routes them to that controller in bimanual
+  mode instead of relying on the single-arm page selection.
+- Verification: focused calibration/transport suite `28 passed`; full `.venv`
+  suite `217 passed`; full no-arm `.venv-arm18` suite `217 passed`. The first
+  guided left-hand session reached live tracking but timed out before any grip
+  press, so no calibration JSON or capture log was created. Do not invent a
+  matrix: resume with the operator present, capture all six signed gestures
+  twice per hand, and only then create the hardware-disabled MuJoCo profile.
+- The existing `configs/dual_widowxai.yaml`, all accepted/candidate physical
+  calibration files, and every physical launcher remain unchanged by this
+  milestone.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.

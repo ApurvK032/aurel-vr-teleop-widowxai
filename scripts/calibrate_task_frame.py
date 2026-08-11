@@ -21,7 +21,7 @@ from widowxai_quest_teleop.task_frame_calibration import (
     fit_direction_map,
     heading_correction,
 )
-from widowxai_quest_teleop.transport import QuestReceiver
+from widowxai_quest_teleop.transport import BimanualQuestReceiver, QuestReceiver
 from widowxai_quest_teleop.types import Pose, QuestSample
 
 
@@ -104,6 +104,45 @@ class SampleStream:
         return sample
 
 
+class BimanualHandSampleStream:
+    """Project one fixed hand from schema-v2 bimanual packets for calibration."""
+
+    def __init__(
+        self,
+        receiver: BimanualQuestReceiver,
+        *,
+        hand: str,
+        mapping_mode: str,
+    ) -> None:
+        self.receiver = receiver
+        self.hand = hand
+        self.mapping_mode = mapping_mode
+        self.generation = 0
+
+    def lock_selection(self, sample: QuestSample) -> None:
+        if sample.hand != self.hand or sample.mapping_mode != self.mapping_mode:
+            raise ValueError(
+                "bimanual calibration received an unexpected hand or mapping mode"
+            )
+
+    def next(self, timeout_s: float = 0.5) -> QuestSample | None:
+        sample, self.generation = self.receiver.mailbox.wait_take_latest(
+            self.generation,
+            timeout_s,
+        )
+        if sample is None:
+            return None
+        controller = sample.controller(self.hand)
+        if controller is None or not controller.tracked:
+            return None
+        if controller.mapping_mode != self.mapping_mode:
+            raise ValueError(
+                f"Quest {self.hand} mapping changed from {self.mapping_mode} "
+                f"to {controller.mapping_mode} during calibration"
+            )
+        return sample.for_hand(self.hand)
+
+
 def average_pose(samples: list[QuestSample]) -> tuple[Pose, np.ndarray]:
     if not samples:
         raise ValueError("no Quest samples were captured")
@@ -123,13 +162,29 @@ def average_pose(samples: list[QuestSample]) -> tuple[Pose, np.ndarray]:
     return Pose(position, controller_quaternion), head_quaternion
 
 
-def publish_prompt(receiver: QuestReceiver, text: str, *, pulse_ms: int = 0) -> None:
+def publish_prompt(
+    receiver: QuestReceiver | BimanualQuestReceiver,
+    text: str,
+    *,
+    pulse_ms: int = 0,
+    hand: str | None = None,
+) -> None:
     receiver.publish({"type": "calibration_prompt", "text": text})
     if pulse_ms:
-        receiver.publish({"type": "haptic", "intensity": 0.75, "duration_ms": pulse_ms})
+        payload: dict[str, object] = {
+            "type": "haptic",
+            "intensity": 0.75,
+            "duration_ms": pulse_ms,
+        }
+        if hand is not None:
+            payload["hand"] = hand
+        receiver.publish(payload)
 
 
-def wait_for_release(stream: SampleStream, timeout_s: float = 20.0) -> None:
+def wait_for_release(
+    stream: SampleStream | BimanualHandSampleStream,
+    timeout_s: float = 20.0,
+) -> None:
     deadline = time.perf_counter() + timeout_s
     released = 0
     while time.perf_counter() < deadline:
@@ -142,7 +197,10 @@ def wait_for_release(stream: SampleStream, timeout_s: float = 20.0) -> None:
     raise TimeoutError("selected controller grip was not released")
 
 
-def wait_for_press(stream: SampleStream, timeout_s: float = 30.0) -> QuestSample:
+def wait_for_press(
+    stream: SampleStream | BimanualHandSampleStream,
+    timeout_s: float = 120.0,
+) -> QuestSample:
     deadline = time.perf_counter() + timeout_s
     while time.perf_counter() < deadline:
         sample = stream.next()
@@ -151,9 +209,23 @@ def wait_for_press(stream: SampleStream, timeout_s: float = 30.0) -> QuestSample
     raise TimeoutError("selected controller grip was not pressed")
 
 
+def wait_for_tracked_sample(
+    stream: SampleStream | BimanualHandSampleStream,
+    timeout_s: float,
+) -> QuestSample | None:
+    """Wait through explicit bimanual tracking-loss frames for a real pose."""
+
+    deadline = time.perf_counter() + timeout_s
+    while time.perf_counter() < deadline:
+        sample = stream.next(min(0.5, deadline - time.perf_counter()))
+        if sample is not None:
+            return sample
+    return None
+
+
 def capture_gesture(
-    stream: SampleStream,
-    receiver: QuestReceiver,
+    stream: SampleStream | BimanualHandSampleStream,
+    receiver: QuestReceiver | BimanualQuestReceiver,
     gesture: Gesture,
     repeat: int,
     repeats: int,
@@ -187,7 +259,12 @@ def capture_gesture(
 
         baseline_samples = list(baseline)[-20:]
         start_pose, head_quaternion = average_pose(baseline_samples)
-        publish_prompt(receiver, f"GO — {gesture.instruction}", pulse_ms=140)
+        publish_prompt(
+            receiver,
+            f"GO — {gesture.instruction}",
+            pulse_ms=140,
+            hand=hand,
+        )
         print("GO")
 
         endpoint: deque[QuestSample] = deque(maxlen=90)
@@ -257,7 +334,12 @@ def capture_gesture(
             f"Accepted: translation={translation_m * 100:.1f} cm, "
             f"rotation={np.degrees(rotation_rad):.1f} deg"
         )
-        publish_prompt(receiver, f"Accepted {gesture.key}", pulse_ms=60)
+        publish_prompt(
+            receiver,
+            f"Accepted {gesture.key}",
+            pulse_ms=60,
+            hand=hand,
+        )
         return observed, details
 
 
@@ -273,24 +355,63 @@ def main() -> None:
     )
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--bimanual-hand",
+        choices=("left", "right"),
+        help="calibrate one fixed hand from the schema-v2 bimanual Quest stream",
+    )
+    parser.add_argument(
+        "--mapping-mode",
+        choices=("real", "mirror"),
+        help="required page mapping for --bimanual-hand",
+    )
+    parser.add_argument(
+        "--simulation-only",
+        action="store_true",
+        help="mark the output as MuJoCo-only and explicitly unaccepted for hardware",
+    )
     args = parser.parse_args()
     if args.repeats < 2 or args.repeats > 5:
         raise SystemExit("--repeats must be between 2 and 5")
+    if (args.bimanual_hand is None) != (args.mapping_mode is None):
+        raise SystemExit("--bimanual-hand and --mapping-mode must be supplied together")
+    if args.bimanual_hand is not None and not args.simulation_only:
+        raise SystemExit(
+            "bimanual guided calibration currently requires --simulation-only"
+        )
 
     output = resolve_project_path(args.output)
     if output.exists() and not args.overwrite:
         raise SystemExit(f"output already exists: {output}; pass --overwrite to replace it")
     config = load_config(args.config)
-    receiver = QuestReceiver(
-        config["quest"]["websocket_url"],
-        hand=None,
-        mapping_mode=None,
-    )
-    stream = SampleStream(receiver)
+    if args.bimanual_hand is None:
+        receiver = QuestReceiver(
+            config["quest"]["websocket_url"],
+            hand=None,
+            mapping_mode=None,
+        )
+        stream: SampleStream | BimanualHandSampleStream = SampleStream(receiver)
+    else:
+        receiver = BimanualQuestReceiver(
+            config["quest"]["websocket_url"],
+            mapping_modes={args.bimanual_hand: args.mapping_mode},
+        )
+        stream = BimanualHandSampleStream(
+            receiver,
+            hand=args.bimanual_hand,
+            mapping_mode=args.mapping_mode,
+        )
     receiver.start()
     print("QUEST-ONLY CALIBRATION: this process does not import a robot driver or send arm commands.")
     print("Stop every run_hardware.py process. Face the direction that should be robot-forward.")
-    print("Choose the controller and Real/Mirror mode on http://localhost:8443/.")
+    if args.bimanual_hand is None:
+        print("Choose the controller and Real/Mirror mode on http://localhost:8443/.")
+    else:
+        print(
+            f"BIMANUAL INPUT: calibrating only the {args.bimanual_hand} controller "
+            f"in {args.mapping_mode} mode; the other controller is ignored."
+        )
+        print("The output is marked MuJoCo-only and is not accepted for hardware.")
     print("Six gestures will be captured twice.")
 
     hand = "page-selected"
@@ -390,7 +511,8 @@ def main() -> None:
         return accepted[existing_count:]
 
     try:
-        first = stream.next(10.0)
+        first_timeout_s = 120.0 if args.bimanual_hand is not None else 10.0
+        first = wait_for_tracked_sample(stream, first_timeout_s)
         if first is None:
             raise SystemExit("no fresh Quest poses arrived; start localhost and enter passthrough first")
         stream.lock_selection(first)
@@ -499,6 +621,17 @@ def main() -> None:
             "hand": hand,
             "mapping_mode": mapping_mode,
         }
+        if args.simulation_only:
+            document["validation_scope"] = {
+                "status": "simulation_only",
+                "allowed_runtime": "mujoco",
+                "hardware_accepted": False,
+                "note": "Captured for MuJoCo mapping; do not use for physical robot output.",
+            }
+            document["physical_validation"] = {
+                "status": "simulation_only",
+                "hardware_motion_performed": False,
+            }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         position_quality = document["guided_calibration"]["position_quality"]
@@ -515,7 +648,12 @@ def main() -> None:
             f"max {rotation_quality['max_axis_error_deg']:.1f} deg"
         )
         print("Do not use it on hardware yet; inspect and validate all six axes in MuJoCo first.")
-        publish_prompt(receiver, "Six-axis calibration saved; validate in MuJoCo", pulse_ms=180)
+        publish_prompt(
+            receiver,
+            "Six-axis calibration saved; validate in MuJoCo",
+            pulse_ms=180,
+            hand=hand,
+        )
     except (TimeoutError, ValueError) as exc:
         raise SystemExit(f"calibration failed: {exc}") from None
     finally:

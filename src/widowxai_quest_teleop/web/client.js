@@ -172,8 +172,12 @@ function connectRelay() {
   socket.onmessage = (event) => {
     let message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
-    if (message.type === "haptic" && selectedInputSource && selectedInputSource.gamepad) {
-      const actuator = selectedInputSource.gamepad.hapticActuators?.[0];
+    if (message.type === "haptic") {
+      const requestedHand = message.hand === "left" || message.hand === "right" ? message.hand : null;
+      const hapticSource = requestedHand && session
+        ? Array.from(session.inputSources).find((source) => source.handedness === requestedHand)
+        : selectedInputSource;
+      const actuator = hapticSource?.gamepad?.hapticActuators?.[0];
       if (actuator) actuator.pulse(Math.max(0, Math.min(1, Number(message.intensity) || 0)), Number(message.duration_ms) || 40);
     }
     if (message.type === "calibration_prompt" && typeof message.text === "string") {

@@ -93,3 +93,22 @@ the calibration-only override is supplied.
 Live two-arm output additionally requires an explicitly accepted calibration
 for each arm and the dual `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token. Do
 not use the single-arm profiles or token for two arms.
+
+For a bimanual MuJoCo-only task-frame capture, calibrate each controller
+separately from the same schema-v2 stream. For example, the left hand uses:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/calibrate_task_frame.py \
+  --config configs/dual_widowxai.yaml \
+  --output configs/calibrations/left_behind_mujoco_20260811.json \
+  --repeats 2 \
+  --overwrite \
+  --bimanual-hand left \
+  --mapping-mode real \
+  --simulation-only
+```
+
+Repeat with `right` and a distinct output. These files are deliberately stamped
+`simulation_only` and are not physical acceptance evidence. Reference them only
+from a hardware-disabled MuJoCo profile; never replace the calibrations in
+`dual_widowxai.yaml` with them.
