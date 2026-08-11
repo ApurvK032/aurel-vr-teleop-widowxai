@@ -850,6 +850,34 @@ changing another variable.
 - Next milestone: make dual feedback freshness/timestamps truthful and preserve
   the faulting joint sample before a safety-stop exception leaves the loop.
 
+### 2026-08-11 — Milestone 2: truthful dual feedback telemetry
+
+- `scripts/run_dual_hardware.py` now records an encoder-read timestamp only
+  after that arm's backend actually returns feedback. Every control row starts
+  with `feedback_sample_fresh=false` and a zero read timestamp, and only an arm
+  read during that row is marked fresh. The previous code incorrectly wrote
+  each arm's next scheduled deadline as though it were the completed read time
+  and marked both arms fresh on every non-idle row.
+- Quest-synchronized idle cycles now reach the common telemetry path. They can
+  perform due encoder checks, but report zero command-send timestamps instead
+  of reusing the preceding command's timestamps. This preserves the distinction
+  between an idle observation and a command-bearing tick.
+- A time-aligned tracking failure now retains the measured feedback, reference,
+  all-joint error, actual read timestamp, and exception text in the final CSV
+  row before the existing fail-closed exception is re-raised. If the first arm
+  faults, the other arm remains explicitly not-read rather than receiving a
+  false freshness claim.
+- The conservative `hardware.max_feedback_error_rad: 0.08` safety threshold was
+  not changed. This milestone makes the next joint-2 event diagnosable; it does
+  not assume that the prior 0.101761 rad event was either genuine lag or a bad
+  reference.
+- Offline verification: focused dual/hardware suite `104 passed`; full `.venv`
+  suite `209 passed`; full no-arm `.venv-arm18` suite `209 passed`. No Quest or
+  arm was connected and no physical command was sent.
+- Next milestone: use the newly preserved evidence to test the time-aligned
+  feedback reference and hold behavior offline, especially the distinction
+  between an interpolated reference and one clamped to the newest command.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.

@@ -70,8 +70,107 @@ class ArmChannel:
     next_feedback_s: float = 0.0
     send_monotonic_ns: int = 0
     send_epoch_ns: int = 0
+    feedback_read_monotonic_ns: int = 0
+    feedback_sample_fresh: bool = False
     reached_rest: bool = False
     notes: list[str] = field(default_factory=list)
+
+
+def reset_feedback_telemetry(channels: dict[str, ArmChannel]) -> None:
+    """Start one control row with no claimed encoder read."""
+
+    for channel in channels.values():
+        channel.feedback_read_monotonic_ns = 0
+        channel.feedback_sample_fresh = False
+
+
+def read_and_validate_channel_feedback(
+    channel: ArmChannel,
+    arm,
+    hardware: dict,
+    feedback_period: float,
+) -> HardwareSafetyError | None:
+    """Read one arm and retain its evidence even when tracking validation fails."""
+
+    feedback = channel.backend.read_state()
+    read_ns = time.perf_counter_ns()
+    read_time_s = read_ns / 1e9
+    channel.feedback_read_monotonic_ns = read_ns
+    channel.feedback_sample_fresh = True
+    arm.q_feedback = feedback.q_arm
+    arm.gripper_feedback_m = float(feedback.gripper_position_m)
+
+    # validate_time_aligned_feedback raises on the one sample that matters most.
+    # Populate the channel first so the caller can write that sample before
+    # re-raising the fail-closed exception.
+    channel.q_feedback_reference = channel.command_history.reference_at(read_time_s)
+    channel.q_feedback_error = feedback.q_arm - channel.q_feedback_reference
+    channel.next_feedback_s = read_time_s + feedback_period
+    try:
+        validate_time_aligned_feedback(
+            feedback.q_arm,
+            read_time_s,
+            channel.command_history,
+            hardware["max_feedback_error_rad"],
+        )
+    except HardwareSafetyError as exc:
+        return exc
+    return None
+
+
+def read_due_feedback(
+    channels: dict[str, ArmChannel],
+    arms: dict[str, object],
+    hardware: dict,
+    feedback_period: float,
+) -> HardwareSafetyError | None:
+    """Read due channels, stopping at the first fail-closed tracking fault."""
+
+    for side in DUAL_ARM_SIDES:
+        channel = channels[side]
+        if time.perf_counter() < channel.next_feedback_s:
+            continue
+        fault = read_and_validate_channel_feedback(
+            channel, arms[side], hardware, feedback_period
+        )
+        if fault is not None:
+            return fault
+    return None
+
+
+def add_feedback_telemetry(
+    record: dict[str, object],
+    channels: dict[str, ArmChannel],
+    *,
+    fault: HardwareSafetyError | None = None,
+) -> dict[str, object]:
+    """Attach truthful per-arm feedback fields to a coordinated tick."""
+
+    for side in DUAL_ARM_SIDES:
+        channel = channels[side]
+        record[f"{side}_q_feedback_reference"] = channel.q_feedback_reference
+        record[f"{side}_q_feedback_error"] = channel.q_feedback_error
+        record[f"{side}_feedback_sample_fresh"] = channel.feedback_sample_fresh
+        record[f"{side}_feedback_read_monotonic_ns"] = channel.feedback_read_monotonic_ns
+    if fault is not None:
+        record["fault_reason"] = str(fault)
+    return record
+
+
+def command_send_telemetry(
+    channels: dict[str, ArmChannel], *, command_sent: bool
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Return this row's sends without reusing timestamps on idle rows."""
+
+    monotonic = {
+        side: channels[side].send_monotonic_ns if command_sent else 0
+        for side in DUAL_ARM_SIDES
+    }
+    epoch = {
+        side: channels[side].send_epoch_ns if command_sent else 0
+        for side in DUAL_ARM_SIDES
+    }
+    return monotonic, epoch
 
 
 def wait_for_released_bimanual(
@@ -605,6 +704,7 @@ def main() -> None:
                 else:
                     sample, _ = receiver.mailbox.take_latest()
                 consume_ns = time.perf_counter_ns()
+                reset_feedback_telemetry(channels)
 
                 limiter_elapsed_s = time.perf_counter() - last_command_send_s
                 if quest_synchronized and command_spacing_stage == "before_send":
@@ -617,111 +717,89 @@ def main() -> None:
                     robot_q_source={side: arms[side].q_feedback for side in DUAL_ARM_SIDES},
                 )
 
-                if quest_synchronized and sample is None and not any(
+                idle_hold = quest_synchronized and sample is None and not any(
                     proposal.active for proposal in tick.proposals.values()
-                ):
+                )
+
+                if not idle_hold:
+                    # Gate both arms before either is sent. A gate rejection on
+                    # one arm must not leave the other already commanded.
+                    for side in DUAL_ARM_SIDES:
+                        channels[side].gate.validate(
+                            arms[side].q_command,
+                            arms[side].gripper_command_m,
+                            update=False,
+                        )
+                    for side in DUAL_ARM_SIDES:
+                        channels[side].gate.validate(
+                            arms[side].q_command,
+                            arms[side].gripper_command_m,
+                        )
+
+                    if quest_synchronized and command_spacing_stage == "before_send":
+                        pre_send_wait_s = minimum_command_spacing_wait(
+                            last_command_send_s,
+                            minimum_command_interval_s,
+                            time.perf_counter(),
+                        )
+                        if pre_send_wait_s > 0.0:
+                            time.sleep(pre_send_wait_s)
+
                     for side in DUAL_ARM_SIDES:
                         channel = channels[side]
-                        if time.perf_counter() >= channel.next_feedback_s:
-                            feedback = channel.backend.read_state()
-                            read_ns = time.perf_counter_ns()
-                            arms[side].q_feedback = feedback.q_arm
-                            arms[side].gripper_feedback_m = float(feedback.gripper_position_m)
-                            (
-                                channel.q_feedback_reference,
-                                channel.q_feedback_error,
-                            ) = validate_time_aligned_feedback(
-                                feedback.q_arm,
-                                read_ns / 1e9,
-                                channel.command_history,
-                                hardware["max_feedback_error_rad"],
+                        arm = arms[side]
+                        if arm.feedforward_filter is None:
+                            channel.backend.send_positions(
+                                arm.q_command,
+                                arm.gripper_command_m,
+                                include_gripper=control_gripper,
                             )
-                            channel.next_feedback_s = read_ns / 1e9 + feedback_period
-                    continue
-
-                # Gate both arms before either is sent. A gate rejection on one
-                # arm must not leave the other arm already commanded.
-                for side in DUAL_ARM_SIDES:
-                    channels[side].gate.validate(
-                        arms[side].q_command, arms[side].gripper_command_m, update=False
-                    )
-                for side in DUAL_ARM_SIDES:
-                    channels[side].gate.validate(
-                        arms[side].q_command, arms[side].gripper_command_m
-                    )
-
-                if quest_synchronized and command_spacing_stage == "before_send":
-                    pre_send_wait_s = minimum_command_spacing_wait(
-                        last_command_send_s, minimum_command_interval_s, time.perf_counter()
-                    )
-                    if pre_send_wait_s > 0.0:
-                        time.sleep(pre_send_wait_s)
-
-                for side in DUAL_ARM_SIDES:
-                    channel = channels[side]
-                    arm = arms[side]
-                    if arm.feedforward_filter is None:
-                        channel.backend.send_positions(
-                            arm.q_command, arm.gripper_command_m, include_gripper=control_gripper
+                        else:
+                            channel.backend.send_positions(
+                                arm.q_command,
+                                arm.gripper_command_m,
+                                include_gripper=control_gripper,
+                                arm_feedforward_velocity=arm.feedforward_velocity,
+                            )
+                        channel.send_monotonic_ns = time.perf_counter_ns()
+                        channel.send_epoch_ns = time.time_ns()
+                        channel.command_history.append(
+                            channel.send_monotonic_ns / 1e9, arm.q_command
                         )
-                    else:
-                        channel.backend.send_positions(
-                            arm.q_command,
-                            arm.gripper_command_m,
-                            include_gripper=control_gripper,
-                            arm_feedforward_velocity=arm.feedforward_velocity,
-                        )
-                    channel.send_monotonic_ns = time.perf_counter_ns()
-                    channel.send_epoch_ns = time.time_ns()
-                    channel.command_history.append(
-                        channel.send_monotonic_ns / 1e9, arm.q_command
-                    )
 
-                sends = [channels[side].send_monotonic_ns for side in DUAL_ARM_SIDES]
-                skew_s = (max(sends) - min(sends)) / 1e9
-                if skew_s > max_skew_s:
-                    raise HardwareSafetyError(
-                        f"measured dual-arm command skew {skew_s * 1000:.3f} ms exceeded the "
-                        f"configured limit {max_skew_s * 1000:.3f} ms"
-                    )
-                last_command_send_s = max(sends) / 1e9
-
-                for side in DUAL_ARM_SIDES:
-                    channel = channels[side]
-                    if time.perf_counter() >= channel.next_feedback_s:
-                        feedback = channel.backend.read_state()
-                        read_ns = time.perf_counter_ns()
-                        arms[side].q_feedback = feedback.q_arm
-                        arms[side].gripper_feedback_m = float(feedback.gripper_position_m)
-                        (
-                            channel.q_feedback_reference,
-                            channel.q_feedback_error,
-                        ) = validate_time_aligned_feedback(
-                            feedback.q_arm,
-                            read_ns / 1e9,
-                            channel.command_history,
-                            hardware["max_feedback_error_rad"],
+                    sends = [channels[side].send_monotonic_ns for side in DUAL_ARM_SIDES]
+                    skew_s = (max(sends) - min(sends)) / 1e9
+                    if skew_s > max_skew_s:
+                        raise HardwareSafetyError(
+                            f"measured dual-arm command skew {skew_s * 1000:.3f} ms exceeded "
+                            f"the configured limit {max_skew_s * 1000:.3f} ms"
                         )
-                        channel.next_feedback_s = read_ns / 1e9 + feedback_period
+                    last_command_send_s = max(sends) / 1e9
+
+                feedback_fault = read_due_feedback(
+                    channels, arms, hardware, feedback_period
+                )
+
+                send_ns_by_side, send_epoch_ns_by_side = command_send_telemetry(
+                    channels, command_sent=not idle_hold
+                )
 
                 record = dual_arm_telemetry_record(
                     tick,
                     consume_ns=consume_ns,
-                    send_ns_by_side={s: channels[s].send_monotonic_ns for s in DUAL_ARM_SIDES},
-                    send_epoch_ns_by_side={s: channels[s].send_epoch_ns for s in DUAL_ARM_SIDES},
+                    send_ns_by_side=send_ns_by_side,
+                    send_epoch_ns_by_side=send_epoch_ns_by_side,
                     sample=sample,
                     overwrite_count=receiver.mailbox.overwrite_count,
                     pre_consume_wait_s=pre_consume_wait_s,
                     pre_send_wait_s=pre_send_wait_s,
                     arms=arms,
                 )
-                for side in DUAL_ARM_SIDES:
-                    channel = channels[side]
-                    record[f"{side}_q_feedback_reference"] = channel.q_feedback_reference
-                    record[f"{side}_q_feedback_error"] = channel.q_feedback_error
-                    record[f"{side}_feedback_sample_fresh"] = True
-                    record[f"{side}_feedback_read_monotonic_ns"] = channel.next_feedback_s
-                telemetry.log(**record)
+                telemetry.log(
+                    **add_feedback_telemetry(record, channels, fault=feedback_fault)
+                )
+                if feedback_fault is not None:
+                    raise feedback_fault
 
                 if quest_synchronized:
                     continue
