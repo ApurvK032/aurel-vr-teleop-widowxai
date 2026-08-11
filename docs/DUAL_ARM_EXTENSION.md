@@ -293,6 +293,12 @@ env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
   --config configs/dual_widowxai.yaml
 ```
 
+Add `--tabletop --inline-viewer` for the provisional 500 mm side-by-side
+tabletop scene. The default 1000 × 700 × 40 mm table and 100 mm rear inset are
+simulation assumptions; all four dimensions have command-line overrides and
+are recorded in the run snapshot. Table contacts participate in the combined
+collision verdict.
+
 No-motion offline checks. Add `--contact-arms` to additionally open a
 read-only driver session to each controller without enabling position mode:
 

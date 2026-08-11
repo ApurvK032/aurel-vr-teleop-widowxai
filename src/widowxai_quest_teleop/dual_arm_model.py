@@ -30,6 +30,55 @@ class CollisionReport:
         return f"{self.kind} collision{side}{bodies}"
 
 
+@dataclass(frozen=True)
+class TabletopGeometry:
+    """A rectangular tabletop expressed in the dual-arm world frame."""
+
+    width_m: float
+    depth_m: float
+    thickness_m: float
+    rear_edge_x_m: float
+    top_z_m: float = 0.0
+
+    def __post_init__(self) -> None:
+        dimensions = np.array(
+            [self.width_m, self.depth_m, self.thickness_m], dtype=float
+        )
+        location = np.array([self.rear_edge_x_m, self.top_z_m], dtype=float)
+        if not np.all(np.isfinite(dimensions)) or np.any(dimensions <= 0.0):
+            raise ValueError("tabletop dimensions must be finite and positive")
+        if not np.all(np.isfinite(location)):
+            raise ValueError("tabletop placement must be finite")
+
+    @classmethod
+    def from_config(cls, raw: dict) -> "TabletopGeometry":
+        if not isinstance(raw, dict):
+            raise ValueError("tabletop configuration must be a mapping")
+        required = ("width_m", "depth_m", "thickness_m", "rear_edge_x_m")
+        missing = [key for key in required if key not in raw]
+        if missing:
+            raise ValueError(f"tabletop configuration is missing: {missing}")
+        return cls(
+            width_m=float(raw["width_m"]),
+            depth_m=float(raw["depth_m"]),
+            thickness_m=float(raw["thickness_m"]),
+            rear_edge_x_m=float(raw["rear_edge_x_m"]),
+            top_z_m=float(raw.get("top_z_m", 0.0)),
+        )
+
+    @property
+    def center(self) -> list[float]:
+        return [
+            self.rear_edge_x_m + self.depth_m / 2.0,
+            0.0,
+            self.top_z_m - self.thickness_m / 2.0,
+        ]
+
+    @property
+    def half_size(self) -> list[float]:
+        return [self.depth_m / 2.0, self.width_m / 2.0, self.thickness_m / 2.0]
+
+
 class DualArmCollisionModel:
     """Both WidowXAI arms in one MuJoCo model at their measured base transforms.
 
@@ -47,6 +96,7 @@ class DualArmCollisionModel:
         *,
         xml_path: str | Path = DEFAULT_MODEL_XML,
         clearance_m: float = 0.0,
+        tabletop: dict | None = None,
     ) -> None:
         missing = [side for side in DUAL_ARM_SIDES if side not in placements]
         if missing:
@@ -79,6 +129,20 @@ class DualArmCollisionModel:
             contype=0,
             conaffinity=0,
         )
+        self.tabletop = (
+            None if tabletop is None else TabletopGeometry.from_config(tabletop)
+        )
+        if self.tabletop is not None:
+            spec.worldbody.add_geom(
+                name="tabletop",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                pos=self.tabletop.center,
+                size=self.tabletop.half_size,
+                rgba=[0.38, 0.24, 0.12, 1.0],
+                contype=1,
+                conaffinity=1,
+                friction=[0.8, 0.02, 0.001],
+            )
 
         self.prefixes = {side: f"{side}_" for side in DUAL_ARM_SIDES}
         for side in DUAL_ARM_SIDES:
@@ -216,6 +280,31 @@ class DualArmCollisionModel:
             name_2 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_2) or ""
             side_1 = self._body_side.get(body_1)
             side_2 = self._body_side.get(body_2)
+            if (side_1 is None) != (side_2 is None):
+                arm_side = side_1 if side_1 is not None else side_2
+                arm_body = name_1 if side_1 is not None else name_2
+                environment_geom_id = (
+                    contact.geom2 if side_1 is not None else contact.geom1
+                )
+                environment_geom = (
+                    mujoco.mj_id2name(
+                        self.model, mujoco.mjtObj.mjOBJ_GEOM, environment_geom_id
+                    )
+                    or "environment"
+                )
+                if environment_geom != "tabletop":
+                    continue
+                # The base is bolted to and intentionally supported by the
+                # tabletop. All other arm-table contacts are hazards.
+                if arm_body == f"{arm_side}_base_link":
+                    continue
+                return CollisionReport(
+                    colliding=True,
+                    kind="environment",
+                    side=arm_side,
+                    bodies=(arm_body, environment_geom),
+                    separation_m=float(contact.dist),
+                )
             if side_1 is None or side_2 is None:
                 continue
             if side_1 != side_2:

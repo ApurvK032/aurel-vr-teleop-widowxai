@@ -16,7 +16,10 @@ from widowxai_quest_teleop.config import (
     require_live_dual_arm_config,
 )
 from widowxai_quest_teleop.dual_arm_coordinator import build_dual_arm_system
-from widowxai_quest_teleop.dual_arm_model import DualArmCollisionModel
+from widowxai_quest_teleop.dual_arm_model import (
+    DualArmCollisionModel,
+    TabletopGeometry,
+)
 from widowxai_quest_teleop.telemetry import (
     DUAL_ARM_TELEMETRY_COLUMNS,
     TELEMETRY_COLUMNS,
@@ -519,6 +522,64 @@ def test_simultaneous_path_screening_covers_both_arms(collision_model) -> None:
     alpha, report = found
     assert 0.0 < alpha <= 1.0
     assert report.kind.startswith("cross-arm")
+
+
+def test_provisional_500mm_tabletop_keeps_rest_and_home_clear(dual_config) -> None:
+    dual_config["simulation_environment"] = {
+        "status": "provisional",
+        "tabletop": {
+            "width_m": 1.0,
+            "depth_m": 0.7,
+            "thickness_m": 0.04,
+            "rear_edge_x_m": -0.10,
+            "top_z_m": 0.0,
+        },
+    }
+    arms, model, _ = build_system(dual_config)
+
+    assert model.tabletop is not None
+    assert model.tabletop.width_m == pytest.approx(1.0)
+    assert model.tabletop.depth_m == pytest.approx(0.7)
+    assert model.check(
+        {"left": REST_Q, "right": REST_Q}, {"left": 0.0, "right": 0.0}
+    ).colliding is False
+    assert model.check(
+        {"left": HOME_Q, "right": HOME_Q}, {"left": 0.04, "right": 0.04}
+    ).colliding is False
+    assert arms["left"].arm_config.placement.position_m[1] == pytest.approx(0.25)
+    assert arms["right"].arm_config.placement.position_m[1] == pytest.approx(-0.25)
+
+
+def test_tabletop_contact_is_an_environment_collision(dual_config) -> None:
+    dual_config["simulation_environment"] = {
+        "tabletop": {
+            "width_m": 1.0,
+            "depth_m": 0.7,
+            "thickness_m": 0.04,
+            "rear_edge_x_m": -0.10,
+            "top_z_m": 0.0,
+        }
+    }
+    _, model, _ = build_system(dual_config)
+    below_table_q = np.array(
+        [0.721916, 3.009115, 0.564246, -0.999520, 0.331046, -2.774283]
+    )
+
+    report = model.check(
+        {"left": below_table_q, "right": HOME_Q},
+        {"left": 0.04, "right": 0.04},
+    )
+
+    assert report.colliding is True
+    assert report.kind == "environment"
+    assert report.side == "left"
+    assert report.bodies is not None
+    assert report.bodies[1] == "tabletop"
+
+
+def test_tabletop_dimensions_fail_closed() -> None:
+    with pytest.raises(ValueError, match="dimensions must be finite and positive"):
+        TabletopGeometry(1.0, 0.0, 0.04, -0.10)
 
 
 # -- coordinated control ---------------------------------------------------

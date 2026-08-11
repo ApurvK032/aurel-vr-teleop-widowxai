@@ -135,6 +135,24 @@ env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
   --config configs/dual_widowxai.yaml
 ```
 
+For the provisional side-by-side tabletop environment requested for the first
+dual test, add `--tabletop --inline-viewer`. It places the bases 500 mm apart
+from the profile and adds a collidable 1000 × 700 × 40 mm tabletop whose rear
+edge is 100 mm behind the base centerline:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
+  --config configs/dual_widowxai.yaml \
+  --tabletop --inline-viewer \
+  --label dual-500mm-tabletop-mujoco
+```
+
+The table dimensions are simulation assumptions, printed at launch and saved
+in the telemetry configuration snapshot. Override them with
+`--table-width-m`, `--table-depth-m`, `--table-thickness-m`, and
+`--base-rear-inset-m` after measuring the bench. An arm/table contact is a
+coordinated collision rejection, not just a visual overlap.
+
 No-motion preflight, including simultaneous and one-arm-moving path screening
 in the combined scene:
 

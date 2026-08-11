@@ -13,6 +13,7 @@ from widowxai_quest_teleop.config import (
     parse_dual_arm_config,
 )
 from widowxai_quest_teleop.dual_arm_coordinator import build_dual_arm_system
+from widowxai_quest_teleop.dual_arm_preflight import offline_checks
 from widowxai_quest_teleop.motion_limiter import (
     bounded_command_period,
     configured_command_spacing_stage,
@@ -143,9 +144,34 @@ def main() -> None:
         action="store_true",
         help="diagnostic only; shows both arms in the combined scene",
     )
+    parser.add_argument(
+        "--tabletop",
+        action="store_true",
+        help="add a collidable provisional tabletop to the dual-arm scene",
+    )
+    parser.add_argument("--table-width-m", type=float, default=1.0)
+    parser.add_argument("--table-depth-m", type=float, default=0.7)
+    parser.add_argument("--table-thickness-m", type=float, default=0.04)
+    parser.add_argument(
+        "--base-rear-inset-m",
+        type=float,
+        default=0.10,
+        help="distance from the table's rear edge to the arm-base centerline",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.tabletop:
+        config["simulation_environment"] = {
+            "status": "provisional",
+            "tabletop": {
+                "width_m": args.table_width_m,
+                "depth_m": args.table_depth_m,
+                "thickness_m": args.table_thickness_m,
+                "rear_edge_x_m": -args.base_rear_inset_m,
+                "top_z_m": 0.0,
+            },
+        }
     try:
         arms_config = parse_dual_arm_config(config)
     except DualArmConfigError as exc:
@@ -158,6 +184,17 @@ def main() -> None:
                 f"NOTE: {side} arm calibration is {arm.calibration_status!r}. "
                 "Simulation is permitted; live output is not."
             )
+    if args.tabletop:
+        print(
+            "PROVISIONAL TABLETOP: "
+            f"{args.table_width_m:.3f} m wide x {args.table_depth_m:.3f} m deep x "
+            f"{args.table_thickness_m:.3f} m thick; base centerline "
+            f"{args.base_rear_inset_m:.3f} m from rear edge. "
+            "Simulation only until these dimensions are measured."
+        )
+        # Reuse the same combined path screen as hardware preflight, but with
+        # the simulation-only tabletop injected above. This opens no backend.
+        offline_checks(config, arms_config)
 
     home_q = np.asarray(config["model"]["simulation_start_q_rad"], dtype=float).reshape(6)
     hardware = config.get("hardware", {}) or {}
@@ -180,7 +217,7 @@ def main() -> None:
     if start_report.colliding:
         raise SystemExit(
             "the configured home pose already fails the combined scene: "
-            f"{start_report.describe()}; re-measure the base transforms"
+            f"{start_report.describe()}; inspect the configured base and table geometry"
         )
     print(
         f"combined scene: home pose clear, closest cross-arm separation "

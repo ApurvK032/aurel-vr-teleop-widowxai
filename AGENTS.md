@@ -932,6 +932,35 @@ changing another variable.
   shared world frame. Replace the placeholder numbers and set `measured` only
   when that measurement has actually been recorded.
 
+### 2026-08-11 — Milestone 5: provisional 500 mm tabletop simulation
+
+- `scripts/run_dual_sim.py --tabletop` now builds the requested simulation-only
+  scene with the existing parallel bases at `y = +/-0.250 m` (500 mm
+  center-to-center). Default provisional table dimensions are 1.000 m wide,
+  0.700 m deep, and 0.040 m thick, with the base centerline 0.100 m forward of
+  the rear edge. All four assumptions have command-line overrides and are
+  written into the telemetry config snapshot.
+- The tabletop is a collidable MuJoCo box, not only viewer decoration.
+  `DualArmCollisionModel` now classifies non-base arm/table contact as an
+  `environment` collision, identifies the affected side and body, and feeds it
+  through the existing coordinated rejection path. The fixed base/table
+  support relationship is intentionally allowed.
+- Offline checks prove rest and home are clear with the provisional table and
+  that a deliberately lowered link is rejected for tabletop penetration. The
+  combined home pose retains approximately 60 mm arm-to-arm separation against
+  the configured 30 mm cross-arm margin.
+- README and dual-extension instructions include the exact Quest-driven viewer
+  command and clearly separate the provisional table assumptions from measured
+  physical geometry.
+- Verification: focused tabletop/dual suite `52 passed`; full `.venv` suite
+  `215 passed`; full no-arm `.venv-arm18` suite `215 passed`. The Quest was
+  authorized over USB, ADB reverse and the relay were started, and the
+  MuJoCo-only viewer reached a clear home pose. No robot backend was opened and
+  no physical command was sent.
+- To drive this scene, select `Bimanual` on the Quest page and enter its WebXR
+  session. A USB connection alone creates the localhost tunnel but does not
+  start controller pose transmission.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.

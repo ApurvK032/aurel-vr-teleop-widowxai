@@ -195,10 +195,14 @@ def build_dual_arm_system(
     """
 
     safety = config.get("safety", {})
+    simulation_environment = config.get("simulation_environment", {}) or {}
+    if not isinstance(simulation_environment, dict):
+        raise ValueError("simulation_environment must be a mapping")
     collision_model = DualArmCollisionModel(
         {side: arms_config[side].placement for side in DUAL_ARM_SIDES},
         xml_path=config["model"]["xml_path"],
         clearance_m=float(safety.get("cross_arm_clearance_m", 0.0)),
+        tabletop=simulation_environment.get("tabletop"),
     )
     arms = {
         side: ArmRuntime(
