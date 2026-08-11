@@ -5,7 +5,7 @@
 # Behind/Parallel calibrations are still candidates, so a live dual-arm run is
 # blocked by configuration until each is physically accepted and recorded.
 #
-# The base transforms below encode the operator-reported 30 cm separation and
+# The base transforms below encode the operator-reported 50 cm separation and
 # are PLACEHOLDERS. Measure both arm bases against one shared world frame and
 # replace them before any physical dual-arm work; every cross-arm collision
 # result is only as trustworthy as these numbers.
@@ -33,16 +33,21 @@ arms:
   left:
     controller_hand: left
     mapping_mode: real
-    robot_ip: 192.168.1.3
+    # Verified on hardware 2026-07-27: .2 is the arm on the operator's LEFT when
+    # standing behind. The earlier assignment was a guess and drove each
+    # controller to the opposite arm.
+    robot_ip: 192.168.1.2
     calibration: configs/calibrations/left_behind_all_motions_20260723_candidate.json
     base_transform:
-      # PLACEHOLDER: +150 mm across from the shared origin (300 mm total).
-      position_m: [0.0, 0.15, 0.0]
+      # PLACEHOLDER: +250 mm across from the shared origin (500 mm total).
+      position_m: [0.0, 0.25, 0.0]
       quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
     # Conservative first-bring-up gains. The accepted single-arm profile runs
     # 0.75/0.75 at 0.125 m / 0.30 rad, but that acceptance covers one arm with
-    # a free workspace. At 300 mm base separation the two arms share a narrow
-    # volume, so the dual-arm profile starts at the tighter Step-3 gains.
+    # a free workspace. 500 mm of base separation leaves a wider shared volume
+    # than the 300 mm this profile was first written against, but nothing about
+    # two arms has been accepted on hardware yet, so the dual-arm profile still
+    # starts at the tighter Step-3 gains.
     translation_scale: 0.45
     rotation_scale: 0.45
     position_reach_limit_m: 0.075
@@ -51,11 +56,11 @@ arms:
   right:
     controller_hand: right
     mapping_mode: real
-    robot_ip: 192.168.1.2
+    robot_ip: 192.168.1.3
     calibration: configs/calibrations/right_behind_all_motions_20260723_candidate.json
     base_transform:
-      # PLACEHOLDER: -150 mm across from the shared origin (300 mm total).
-      position_m: [0.0, -0.15, 0.0]
+      # PLACEHOLDER: -250 mm across from the shared origin (500 mm total).
+      position_m: [0.0, -0.25, 0.0]
       quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
     translation_scale: 0.45
     rotation_scale: 0.45

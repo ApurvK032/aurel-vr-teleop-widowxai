@@ -837,7 +837,7 @@ changing another variable.
    bimanual WebXR packet, combined MuJoCo scene, per-arm runtime, coordinated
    controller, dual telemetry, and three launchers, with offline tests. What
    remains is operational: measure both arm base transforms (the shipped
-   300 mm values in `configs/dual_widowxai.yaml` are placeholders), then
+   500 mm values in `configs/dual_widowxai.yaml` are placeholders), then
    physically accept a per-hand calibration for each arm.
 5. Two-arm driver output stays configuration-blocked until each arm has an
    explicitly accepted calibration. `require_live_dual_arm_config` enforces
@@ -846,8 +846,10 @@ changing another variable.
    make a two-arm run launch.
 6. At 300 mm base separation the two arms collide when yawed roughly 0.25 rad
    toward each other, and the 30 mm clearance margin rejects at about
-   0.20 rad. The shared workspace is narrow; confirm the measured separation
-   and consider a wider one before expecting overlapping bimanual tasks.
+   0.20 rad. Both figures come from the 300 mm fixtures in
+   `tests/test_dual_arm_safety.py` and no longer describe the configured
+   bench, which the operator reports at 500 mm. Re-derive them at the measured
+   separation before expecting overlapping bimanual tasks.
 7. `scripts/run_cad_sim.py` passes 13 telemetry keys that `TELEMETRY_COLUMNS`
    never declared, so they have always been silently discarded. This is
    pre-existing and left unchanged; `tests/test_dual_arm_safety.py` pins it as

@@ -311,6 +311,28 @@ class DualArmCollisionModel:
                     None,
                 )
             )
+            if distance == 0.0:
+                # The 3.8.1 box-box zero, which appears once distmax grows past
+                # the true separation. Re-ask at the margin itself: there
+                # distmax <= the true separation whenever the pair is actually
+                # clear, which is the regime the primitive handles, and it
+                # answers with distmax. A pair that is genuinely inside the
+                # margin still reports below it, spurious zero or not, so the
+                # verdict stays correct in both directions.
+                #
+                # max() against lower_bound cannot catch this on its own: the
+                # bound is negative whenever the bounding spheres overlap, and
+                # max(0.0, negative) is still 0.0.
+                distance = float(
+                    mujoco.mj_geomDistance(
+                        self.model,
+                        self.data,
+                        left[left_index],
+                        right[right_index],
+                        self.clearance_m,
+                        None,
+                    )
+                )
             distance = max(distance, lower_bound)
             if distance < minimum:
                 minimum = distance
@@ -358,6 +380,80 @@ class DualArmCollisionModel:
             if report.colliding:
                 return float(alpha), report
         return None
+
+    def deepest_contact_m(
+        self,
+        q_by_side: dict[str, np.ndarray],
+        gripper_by_side: dict[str, float],
+    ) -> float:
+        """Deepest interpenetration at one state, ignoring the carriage pair."""
+
+        report = self.check(q_by_side, gripper_by_side)
+        if not report.colliding or report.kind == "cross-arm-clearance":
+            return 0.0
+        return max(0.0, -report.separation_m)
+
+    def relieving_step(
+        self,
+        start_q: dict[str, np.ndarray],
+        toward_q: dict[str, np.ndarray],
+        gripper_by_side: dict[str, float],
+        *,
+        marginal_limit_m: float,
+        samples: int = 201,
+        headroom: float = 3.0,
+        minimum_extra: float = 0.02,
+    ) -> tuple[float, dict[str, np.ndarray]]:
+        """Find the smallest step along ``start -> toward`` that clears contact.
+
+        Used to lift an arm off a gravity-drooped pose before the real startup
+        screen runs. The arm is physically resting at ``start``, so the model
+        does not get to veto being there -- but it must prove the motion only
+        ever RELIEVES the contact and does clear it. A step that deepens
+        anything, or a start deeper than ``marginal_limit_m``, is refused: that
+        could be a genuine fold rather than model conservatism.
+        """
+
+        start_depth = self.deepest_contact_m(start_q, gripper_by_side)
+        if start_depth <= 0.0:
+            return 0.0, {side: np.asarray(start_q[side], dtype=float).copy() for side in DUAL_ARM_SIDES}
+        if start_depth > marginal_limit_m:
+            raise ValueError(
+                f"start pose interpenetrates {start_depth * 1000:.3f} mm, deeper than the "
+                f"{marginal_limit_m * 1000:.0f} mm marginal limit; inspect the arm before moving it"
+            )
+
+        cleared_at = None
+        for alpha in np.linspace(0.0, 1.0, max(2, int(samples))):
+            state = {
+                side: start_q[side] + alpha * (toward_q[side] - start_q[side])
+                for side in DUAL_ARM_SIDES
+            }
+            depth = self.deepest_contact_m(state, gripper_by_side)
+            if depth > start_depth + 1e-9:
+                raise ValueError(
+                    f"path deepens the contact at {alpha * 100:.1f}% "
+                    f"({depth * 1000:.3f} mm vs {start_depth * 1000:.3f} mm at the start); "
+                    "this drives further in, not out"
+                )
+            if depth <= 0.0:
+                cleared_at = alpha
+                break
+        if cleared_at is None:
+            raise ValueError("path never leaves model contact")
+
+        # Overshoot so the arm settles with real margin rather than a few
+        # thousandths above the boundary it just left -- otherwise it can droop
+        # straight back under. The absolute floor matters because clearing can
+        # happen a fraction of a percent in, where a multiplier alone is tiny.
+        alpha = min(1.0, max(cleared_at * headroom, cleared_at + minimum_extra))
+        target = {
+            side: start_q[side] + alpha * (toward_q[side] - start_q[side])
+            for side in DUAL_ARM_SIDES
+        }
+        if self.deepest_contact_m(target, gripper_by_side) > 0.0:
+            raise ValueError("relieving target is still in contact")
+        return alpha, target
 
     def set_viewer_qpos(
         self,

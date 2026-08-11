@@ -84,7 +84,7 @@ blocks with per-arm `arms.left` / `arms.right` entries plus a `safety` block,
 and it is validated by `config.parse_dual_arm_config` rather than by the
 single-arm loader.
 
-Its base transforms are placeholders encoding a 300 mm separation. Measure both
+Its base transforms are placeholders encoding a 500 mm separation. Measure both
 arm bases against one shared world frame before any physical dual-arm work.
 
 Live two-arm output additionally requires an explicitly accepted calibration

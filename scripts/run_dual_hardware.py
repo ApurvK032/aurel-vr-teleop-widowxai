@@ -48,6 +48,11 @@ from widowxai_quest_teleop.telemetry import DUAL_ARM_TELEMETRY_COLUMNS, Telemetr
 from widowxai_quest_teleop.transport import BimanualQuestReceiver
 
 GRIP_RELEASED = 0.65
+# A contact this shallow, at a pose the arm is physically resting in, is model
+# conservatism near the zero fold rather than a real fold. For reference the
+# closed gripper's own carriage pair reports ~0.18 mm and is already
+# whitelisted in model.py.
+DEFAULT_MARGINAL_CONTACT_M = 0.002
 
 
 @dataclass
@@ -349,7 +354,13 @@ def main() -> None:
 
     receiver = BimanualQuestReceiver(
         config["quest"]["websocket_url"],
-        mapping_modes={side: arms_config[side].mapping_mode for side in DUAL_ARM_SIDES},
+        # Keyed by controller hand, not arm side: the transport checks each
+        # hand's page selection, and the two differ whenever a profile swaps
+        # the hand-to-arm assignment.
+        mapping_modes={
+            arms_config[side].controller_hand: arms_config[side].mapping_mode
+            for side in DUAL_ARM_SIDES
+        },
     )
 
     quest = config["quest"]
@@ -380,11 +391,77 @@ def main() -> None:
                 f"q={np.round(states[side].q_arm, 3).tolist()}"
             )
 
+        startup_max_delta_bootstrap = np.asarray(
+            hardware.get("startup_max_joint_delta_rad", config["ik"]["max_dq_per_joint_rad"]),
+            dtype=float,
+        ).reshape(6)
+        measured = {side: states[side].q_arm.copy() for side in DUAL_ARM_SIDES}
+        grippers = {side: float(states[side].gripper_position_m) for side in DUAL_ARM_SIDES}
+
+        # An unpowered arm sags under gravity, so the pose measured at connect
+        # is where it drooped to, not where it was parked. That droop can put a
+        # joint marginally inside the model's collision geometry near zero. The
+        # arm is physically resting there, so lift it off the droop first, then
+        # screen the real ramp from the held pose with no exemption at all.
+        marginal_limit_m = float(
+            hardware.get("startup_marginal_contact_m", DEFAULT_MARGINAL_CONTACT_M)
+        )
+        try:
+            alpha, settle_q = collision_model.relieving_step(
+                measured,
+                {side: home_q for side in DUAL_ARM_SIDES},
+                grippers,
+                marginal_limit_m=marginal_limit_m,
+                samples=int(hardware["startup_collision_samples"]),
+            )
+        except ValueError as exc:
+            raise HardwareSafetyError(
+                f"combined scene rejects the measured startup pose: {exc}"
+            ) from None
+
+        if alpha > 0.0:
+            print(
+                f"startup: measured pose is {alpha * 100:.1f}% inside the model's "
+                "near-zero geometry (gravity droop); energising and lifting off it first"
+            )
+            for side in DUAL_ARM_SIDES:
+                channels[side].gate = make_startup_command_gate(
+                    states[side], startup_max_delta_bootstrap, hardware
+                )
+            for side in DUAL_ARM_SIDES:
+                channels[side].backend.enable_position_control(include_gripper=False)
+                channels[side].motion_started = True
+                channels[side].backend.send_positions(
+                    measured[side], grippers[side], include_gripper=False
+                )
+            for side in DUAL_ARM_SIDES:
+                channels[side].backend.move_to_rest(
+                    settle_q[side],
+                    grippers[side],
+                    duration_s=float(hardware.get("startup_settle_duration_s", 2.0)),
+                    include_gripper=False,
+                )
+            # Re-measure from the actively held pose. This, not the drooped
+            # reading, is what the startup ramp is screened against.
+            for side in DUAL_ARM_SIDES:
+                states[side] = channels[side].backend.read_state()
+                measured[side] = states[side].q_arm.copy()
+                grippers[side] = float(states[side].gripper_position_m)
+                print(
+                    f"        {side}: held q = {np.round(states[side].q_arm, 6).tolist()}"
+                )
+            held_depth = collision_model.deepest_contact_m(measured, grippers)
+            if held_depth > 0.0:
+                raise HardwareSafetyError(
+                    f"arms still report a {held_depth * 1000:.3f} mm model contact after "
+                    "the settle move; refusing to ramp"
+                )
+
         found = collision_model.first_collision_on_path(
-            {side: states[side].q_arm for side in DUAL_ARM_SIDES},
+            measured,
             {side: home_q for side in DUAL_ARM_SIDES},
-            start_gripper={side: states[side].gripper_position_m for side in DUAL_ARM_SIDES},
-            end_gripper={side: states[side].gripper_position_m for side in DUAL_ARM_SIDES},
+            start_gripper=grippers,
+            end_gripper=grippers,
             samples=int(hardware["startup_collision_samples"]),
         )
         if found is not None:

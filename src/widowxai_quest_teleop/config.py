@@ -158,14 +158,7 @@ class ArmConfig:
         return self.calibration_status.startswith("accepted")
 
 
-def calibration_acceptance_status(calibration_path: str | Path) -> str:
-    """Report a calibration's recorded operator acceptance.
-
-    Acceptance is currently written in three unnormalised places. This reads
-    all of them and fails closed to ``"unrecorded"`` rather than guessing, so a
-    dual-arm live gate can never infer acceptance that nobody recorded.
-    """
-
+def _load_calibration(calibration_path: str | Path) -> dict[str, Any]:
     resolved = resolve_project_path(calibration_path)
     if not resolved.exists():
         raise DualArmConfigError(f"calibration file is missing: {resolved}")
@@ -175,7 +168,38 @@ def calibration_acceptance_status(calibration_path: str | Path) -> str:
         raise DualArmConfigError(f"calibration file is not valid JSON: {resolved}") from exc
     if not isinstance(document, dict):
         raise DualArmConfigError(f"calibration file must be a mapping: {resolved}")
+    return document
 
+
+def calibration_quest_selection(
+    calibration_path: str | Path,
+) -> tuple[str | None, str | None]:
+    """Report the Quest hand and mapping mode a calibration was captured under.
+
+    Anything the file does not record comes back as ``None``, so an older
+    calibration reads as unknown rather than as agreement.
+    """
+
+    quest_input = _load_calibration(calibration_path).get("quest_input")
+    if not isinstance(quest_input, dict):
+        return (None, None)
+
+    def recorded(key: str) -> str | None:
+        value = quest_input.get(key)
+        return str(value).lower() if isinstance(value, str) and value.strip() else None
+
+    return (recorded("hand"), recorded("mapping_mode"))
+
+
+def calibration_acceptance_status(calibration_path: str | Path) -> str:
+    """Report a calibration's recorded operator acceptance.
+
+    Acceptance is currently written in three unnormalised places. This reads
+    all of them and fails closed to ``"unrecorded"`` rather than guessing, so a
+    dual-arm live gate can never infer acceptance that nobody recorded.
+    """
+
+    document = _load_calibration(calibration_path)
     for section, key in (
         ("physical_validation", "status"),
         ("physical_axis_acceptance", "status"),
@@ -297,6 +321,24 @@ def parse_dual_arm_config(config: dict[str, Any]) -> dict[str, ArmConfig]:
     ips = [arm.robot_ip for arm in arms.values()]
     if len(set(ips)) != len(ips):
         raise DualArmConfigError(f"both arms use the same controller IP: {ips[0]}")
+
+    # A task frame is only valid for the hand and page mode it was captured
+    # under. A profile that swaps the hand-to-arm assignment or switches to
+    # Mirrored makes this easy to get wrong, and the mismatch is otherwise
+    # invisible until an arm moves the wrong way.
+    for side in DUAL_ARM_SIDES:
+        arm = arms[side]
+        hand, mapping_mode = calibration_quest_selection(arm.calibration)
+        if hand is not None and hand != arm.controller_hand:
+            raise DualArmConfigError(
+                f"arms.{side} drives the {arm.controller_hand} controller but its "
+                f"calibration was captured for the {hand} hand: {arm.calibration}"
+            )
+        if mapping_mode is not None and mapping_mode != arm.mapping_mode:
+            raise DualArmConfigError(
+                f"arms.{side} expects {arm.mapping_mode} mapping but its calibration "
+                f"was captured under {mapping_mode}: {arm.calibration}"
+            )
 
     placements = [arms[side].placement.position_m for side in DUAL_ARM_SIDES]
     separation_m = float(np.linalg.norm(placements[0] - placements[1]))

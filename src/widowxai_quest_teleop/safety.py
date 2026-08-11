@@ -57,6 +57,33 @@ class TimeAlignedCommandHistory:
             self._times.popleft()
             self._commands.popleft()
 
+    @property
+    def newest_time_s(self) -> float:
+        """Timestamp of the most recent appended command."""
+
+        return self._times[-1]
+
+    @property
+    def oldest_time_s(self) -> float:
+        """Timestamp of the oldest retained command."""
+
+        return self._times[0]
+
+    def clamp_state(self, feedback_time_s: float) -> str:
+        """Describe how ``reference_at`` would resolve this feedback time.
+
+        A tracking-error fault reads very differently depending on whether the
+        reference was interpolated or frozen at an end of the history, so the
+        fault message reports it rather than leaving it to be guessed.
+        """
+
+        target_time = float(feedback_time_s) - self.delay_s
+        if target_time <= self._times[0]:
+            return "clamped-to-oldest"
+        if target_time >= self._times[-1]:
+            return "clamped-to-newest"
+        return "interpolated"
+
     def reference_at(self, feedback_time_s: float) -> np.ndarray:
         feedback_time = float(feedback_time_s)
         if not np.isfinite(feedback_time):

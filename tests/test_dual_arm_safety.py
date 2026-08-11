@@ -7,6 +7,7 @@ import pytest
 
 from widowxai_quest_teleop.config import (
     ArmPlacement,
+    DUAL_ARM_SIDES,
     DualArmConfigError,
     calibration_acceptance_status,
     dual_live_confirmation_token,
@@ -21,9 +22,12 @@ from widowxai_quest_teleop.telemetry import (
     TELEMETRY_COLUMNS,
     TelemetryLogger,
 )
+from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.transport import parse_bimanual_pose_message
+from widowxai_quest_teleop.types import Pose
 
 DUAL_CONFIG = "configs/dual_widowxai.yaml"
+MIRRORED_DUAL_CONFIG = "configs/dual_widowxai_mirrored.yaml"
 HOME_Q = np.array([0.0, 1.0471975512, 1.3089969390, -1.0471975512, 0.0, 0.0])
 REST_Q = np.zeros(6)
 
@@ -41,6 +45,11 @@ def yawed(base_yaw_rad: float) -> np.ndarray:
 @pytest.fixture
 def dual_config() -> dict:
     return load_config(DUAL_CONFIG)
+
+
+@pytest.fixture
+def mirrored_dual_config() -> dict:
+    return load_config(MIRRORED_DUAL_CONFIG)
 
 
 @pytest.fixture(scope="module")
@@ -62,9 +71,11 @@ def test_shipped_dual_profile_loads_and_records_both_arms(dual_config) -> None:
 
     assert arms["left"].controller_hand == "left"
     assert arms["right"].controller_hand == "right"
-    assert arms["left"].robot_ip == "192.168.1.3"
-    assert arms["right"].robot_ip == "192.168.1.2"
-    assert dual_config["_dual_arm"]["base_separation_m"] == pytest.approx(0.30)
+    # Verified against the physical bench: .2 sits on the operator's left when
+    # standing behind the arms, .3 on the right.
+    assert arms["left"].robot_ip == "192.168.1.2"
+    assert arms["right"].robot_ip == "192.168.1.3"
+    assert dual_config["_dual_arm"]["base_separation_m"] == pytest.approx(0.50)
     # Each arm uses a calibration measured for its own controller hand.
     assert "left" in arms["left"].calibration
     assert "right" in arms["right"].calibration
@@ -95,7 +106,9 @@ def test_missing_calibration_file_is_rejected(dual_config) -> None:
 
 
 def test_coincident_arm_bases_are_rejected(dual_config) -> None:
-    dual_config["arms"]["left"]["base_transform"]["position_m"] = [0.0, -0.15, 0.0]
+    # Must stay equal to the shipped right-arm position, or this stops testing
+    # coincidence and silently passes for the wrong reason.
+    dual_config["arms"]["left"]["base_transform"]["position_m"] = [0.0, -0.25, 0.0]
     with pytest.raises(DualArmConfigError, match="same measured position"):
         parse_dual_arm_config(dual_config)
 
@@ -191,10 +204,185 @@ def test_dual_live_token_can_never_be_a_single_arm_token(dual_config) -> None:
     arms = parse_dual_arm_config(dual_config)
     token = dual_live_confirmation_token(arms)
 
-    assert token == "LIVE-WIDOWXAI-DUAL-192.168.1.3-192.168.1.2"
+    # Order is left-then-right, so swapping which physical arm is which side
+    # changes the token. That is deliberate: a token minted for one side
+    # assignment must not authorise the opposite one.
+    assert token == "LIVE-WIDOWXAI-DUAL-192.168.1.2-192.168.1.3"
+    assert token != "LIVE-WIDOWXAI-DUAL-192.168.1.3-192.168.1.2"
     assert token != "LIVE-WIDOWXAI-192.168.1.2"
     assert token != "LIVE-WIDOWXAI-192.168.1.3"
     assert not token.startswith("LIVE-WIDOWXAI-192.")
+
+
+# -- mirrored operator-view profile ----------------------------------------
+
+
+def mirror_pair_sample(sequence: int, position, mapping_mode: str):
+    """One bimanual frame with both hands at the same raw WebXR pose."""
+
+    block = {
+        "tracked": True,
+        "mapping_mode": mapping_mode,
+        "position": list(position),
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "grip": 0.9,
+        "trigger": 0.0,
+    }
+    return parse_bimanual_pose_message(
+        {
+            "type": "bimanual_pose",
+            "schema_version": 2,
+            "sequence": sequence,
+            "capture_monotonic_ms": float(sequence) * 11.0,
+            "capture_epoch_ms": 1.7e12 + sequence,
+            "send_monotonic_ms": float(sequence) * 11.0,
+            "left": dict(block),
+            "right": dict(block),
+        },
+        mapping_modes={"left": mapping_mode, "right": mapping_mode},
+    )
+
+
+def transported_translation(hand: str, mapping_mode: str, calibration: str):
+    """Arm-frame translation for one raw hand step, through the real packet path.
+
+    The sagittal reflection lives in the transport, not the mapper, so a test
+    that drives ``ClutchPoseMapper`` directly would never exercise mirror mode.
+    """
+
+    start = np.array([0.30, 0.20, 0.25])
+    step = np.array([0.05, 0.03, 0.02])
+    first = mirror_pair_sample(1, start, mapping_mode).for_hand(hand)
+    second = mirror_pair_sample(2, start + step, mapping_mode).for_hand(hand)
+    mapper = ClutchPoseMapper(
+        calibration,
+        position_reach_limit_m=None,
+        rotation_reach_limit_rad=None,
+    )
+    anchor = Pose(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    mapper.engage(first.controller_pose, anchor, np.zeros(3))
+    return mapper.update(second.controller_pose, anchor).position
+
+
+def test_mirrored_profile_assigns_the_near_hand_to_each_arm(mirrored_dual_config) -> None:
+    arms = parse_dual_arm_config(mirrored_dual_config)
+
+    # Facing the arms, +y (192.168.1.2) is on the operator's right, so the
+    # hand-to-arm assignment is swapped relative to the Behind profile.
+    assert arms["left"].robot_ip == "192.168.1.2"
+    assert arms["left"].controller_hand == "right"
+    assert arms["right"].robot_ip == "192.168.1.3"
+    assert arms["right"].controller_hand == "left"
+    assert arms["left"].mapping_mode == "mirror"
+    assert arms["right"].mapping_mode == "mirror"
+    assert mirrored_dual_config["_dual_arm"]["base_separation_m"] == pytest.approx(0.50)
+
+
+def test_mirrored_profile_keeps_every_dual_arm_safety_gate(mirrored_dual_config) -> None:
+    safety = mirrored_dual_config["safety"]
+    assert safety["cross_arm_collision"] is True
+    assert safety["coordinated_fault_hold"] is True
+    assert safety["cross_arm_clearance_m"] == pytest.approx(0.030)
+    assert mirrored_dual_config["hardware"]["max_demo_duration_s"] == pytest.approx(60.0)
+
+
+def test_mirrored_live_output_is_blocked_by_the_pending_left_hand_transform(
+    mirrored_dual_config,
+) -> None:
+    """One accepted transform is not two. The gate must still refuse."""
+
+    arms = parse_dual_arm_config(mirrored_dual_config)
+    assert arms["left"].calibration_accepted
+    assert not arms["right"].calibration_accepted
+    with pytest.raises(DualArmConfigError, match="explicitly accepted calibration"):
+        require_live_dual_arm_config(mirrored_dual_config, arms)
+
+
+def test_calibration_captured_for_the_other_hand_is_rejected(mirrored_dual_config) -> None:
+    mirrored_dual_config["arms"]["left"]["calibration"] = mirrored_dual_config["arms"][
+        "right"
+    ]["calibration"]
+    with pytest.raises(DualArmConfigError, match="captured for the left hand"):
+        parse_dual_arm_config(mirrored_dual_config)
+
+
+def test_calibration_captured_under_the_other_mapping_mode_is_rejected(
+    mirrored_dual_config,
+) -> None:
+    mirrored_dual_config["arms"]["left"]["mapping_mode"] = "real"
+    with pytest.raises(DualArmConfigError, match="captured under mirror"):
+        parse_dual_arm_config(mirrored_dual_config)
+
+
+def test_mirror_mode_is_a_proper_rotation_of_the_behind_mapping() -> None:
+    """Mirrored is a 180 degree yaw, not a reflection, once the page reflection
+    and the calibration's cancelling task frame are both applied."""
+
+    yaw_180 = np.array([-1.0, -1.0, 1.0])
+    for hand, behind, mirror in (
+        (
+            "left",
+            "configs/calibrations/left_behind_all_motions_20260723_candidate.json",
+            "configs/calibrations/left_mirror_all_motions_20260723_candidate.json",
+        ),
+        (
+            "right",
+            "configs/calibrations/right_behind_all_motions_20260723_candidate.json",
+            "configs/calibrations/right_mirror_20260723_accepted.json",
+        ),
+    ):
+        behind_translation = transported_translation(hand, "real", behind)
+        mirror_translation = transported_translation(hand, "mirror", mirror)
+        assert np.allclose(mirror_translation, yaw_180 * behind_translation)
+        # Left/right and forward/back reverse, up/down does not.
+        assert not np.allclose(mirror_translation, behind_translation)
+
+
+def test_mirroring_both_hands_leaves_them_independent() -> None:
+    """Mirror is a per-hand input convention, so it cannot cross the arms."""
+
+    sample = mirror_pair_sample(1, np.array([0.30, 0.20, 0.25]), "mirror")
+    left = sample.for_hand("left")
+    right = sample.for_hand("right")
+    # Same raw pose in, same mirrored pose out: neither hand's reflection is
+    # taken about the other hand or about the shared world frame.
+    assert np.allclose(left.controller_pose.position, right.controller_pose.position)
+    assert np.allclose(left.controller_pose.position, [-0.30, 0.20, 0.25])
+
+
+def test_one_hand_left_on_the_wrong_page_mode_discards_the_whole_frame() -> None:
+    """Both dropdowns must read Mirrored; a half-switched page is not partial."""
+
+    with pytest.raises(ValueError, match="left mapping mode real, expected mirror"):
+        parse_bimanual_pose_message(
+            {
+                "type": "bimanual_pose",
+                "schema_version": 2,
+                "sequence": 1,
+                "capture_monotonic_ms": 11.0,
+                "capture_epoch_ms": 1.7e12,
+                "send_monotonic_ms": 11.0,
+                "left": {"tracked": True, "mapping_mode": "real",
+                         "position": [0.3, 0.2, 0.25],
+                         "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]},
+                "right": {"tracked": True, "mapping_mode": "mirror",
+                          "position": [0.3, -0.2, 0.25],
+                          "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]},
+            },
+            mapping_modes={"left": "mirror", "right": "mirror"},
+        )
+
+
+def test_expected_mapping_modes_are_keyed_by_controller_hand(mirrored_dual_config) -> None:
+    """The launchers key the transport by hand; keying by arm side would send
+    the swapped profile's expectations to the wrong controller."""
+
+    arms = parse_dual_arm_config(mirrored_dual_config)
+    by_hand = {
+        arms[side].controller_hand: arms[side].mapping_mode for side in DUAL_ARM_SIDES
+    }
+    assert set(by_hand) == {"left", "right"}
+    assert by_hand == {"left": "mirror", "right": "mirror"}
 
 
 # -- combined scene --------------------------------------------------------

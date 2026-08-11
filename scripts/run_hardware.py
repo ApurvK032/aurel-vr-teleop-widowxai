@@ -378,10 +378,20 @@ def validate_time_aligned_feedback(
     absolute_error = np.abs(error)
     joint = int(np.argmax(absolute_error))
     if absolute_error[joint] > float(max_error_rad):
+        # The faulting sample is the one sample that never reaches telemetry:
+        # every caller validates before writing its record, so raising bare
+        # discards the only evidence of what went wrong. Carry it in the
+        # message instead.
+        reference_age_s = float(feedback_time_s) - command_history.newest_time_s
         raise HardwareSafetyError(
             f"measured joint {joint} time-aligned tracking error "
             f"{absolute_error[joint]:.6f} rad exceeded the demo limit "
             f"{float(max_error_rad):.6f} rad"
+            f" | measured={measured[joint]:.6f} reference={reference[joint]:.6f}"
+            f" | reference {command_history.clamp_state(feedback_time_s)},"
+            f" newest command {reference_age_s * 1000.0:.1f} ms old,"
+            f" history spans {(command_history.newest_time_s - command_history.oldest_time_s) * 1000.0:.1f} ms"
+            f" | all-joint |error| = {np.round(absolute_error, 6).tolist()}"
         )
     return reference, error
 

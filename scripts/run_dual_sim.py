@@ -190,7 +190,13 @@ def main() -> None:
 
     receiver = BimanualQuestReceiver(
         config["quest"]["websocket_url"],
-        mapping_modes={side: arms_config[side].mapping_mode for side in DUAL_ARM_SIDES},
+        # Keyed by controller hand, not arm side: the transport checks each
+        # hand's page selection, and the two differ whenever a profile swaps
+        # the hand-to-arm assignment.
+        mapping_modes={
+            arms_config[side].controller_hand: arms_config[side].mapping_mode
+            for side in DUAL_ARM_SIDES
+        },
     )
     receiver.start()
 

@@ -11,7 +11,7 @@ single-arm processes and hoping they remain synchronized.
 > two physical arms may move is operational, not structural:
 >
 > 1. **measure both arm base transforms** — the shipped values are placeholders
->    encoding a 300 mm separation, and every cross-arm result depends on them;
+>    encoding a 500 mm separation, and every cross-arm result depends on them;
 > 2. **physically accept a calibration for each arm** — both per-hand
 >    Behind/Parallel calibrations are still candidates, and
 >    `require_live_dual_arm_config` refuses live output until each is accepted;

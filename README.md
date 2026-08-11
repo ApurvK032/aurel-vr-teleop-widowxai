@@ -151,7 +151,7 @@ Behind/Parallel calibrations are still candidates. It also requires its own
 `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token; the single-arm
 `LIVE-WIDOWXAI-<ip>` token can never enable two arms.
 
-Base transforms in `configs/dual_widowxai.yaml` encode a 300 mm separation and
+Base transforms in `configs/dual_widowxai.yaml` encode a 500 mm separation and
 are **placeholders**. Measure both arm bases against one shared world frame
 before any physical work — every cross-arm collision result depends on them.
 
