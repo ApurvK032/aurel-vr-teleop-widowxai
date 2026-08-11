@@ -63,6 +63,7 @@ class DecoupledIK:
             if max_dq_per_joint is None
             else np.asarray(max_dq_per_joint, dtype=float).reshape(6).copy()
         )
+        self.joint_limits = self.model.joint_limits.copy()
 
     @classmethod
     def from_config(cls, model: WidowXAIModel, config: dict) -> "DecoupledIK":
@@ -83,7 +84,16 @@ class DecoupledIK:
         )
 
     def _clamp_joints(self, q_arm: np.ndarray) -> np.ndarray:
-        return self.model.clamp_joints(q_arm)
+        q = np.asarray(q_arm, dtype=float).reshape(6)
+        return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+    def set_joint_limits(self, joint_limits: np.ndarray) -> None:
+        """Use deployment limits, including any hardware safety margin."""
+
+        limits = np.asarray(joint_limits, dtype=float).reshape(6, 2).copy()
+        if not np.all(np.isfinite(limits)) or np.any(limits[:, 0] >= limits[:, 1]):
+            raise ValueError("invalid IK joint limits")
+        self.joint_limits = limits
 
     @staticmethod
     def _adaptive_damping(base: float, extra: float, manipulability: float, threshold: float) -> float:
@@ -177,7 +187,7 @@ class DecoupledIK:
         orientation_residual = float(
             np.linalg.norm(orientation_error_world(target.quaternion_wxyz, current_ee.quaternion_wxyz))
         )
-        margins = np.minimum(q - self.model.joint_limits[:, 0], self.model.joint_limits[:, 1] - q)
+        margins = np.minimum(q - self.joint_limits[:, 0], self.joint_limits[:, 1] - q)
         diagnostics = IKDiagnostics(
             position_residual_m=position_residual,
             orientation_residual_rad=orientation_residual,

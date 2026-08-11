@@ -9,8 +9,49 @@ const capturedText = document.getElementById("captured");
 const sentText = document.getElementById("sent");
 const coalescedText = document.getElementById("coalesced");
 const calibrationText = document.getElementById("calibration");
+const controllerDescription = document.getElementById("controller-description");
+const handSelect = document.getElementById("hand-select");
+const mappingModeSelect = document.getElementById("mapping-mode-select");
+const inputModeSelect = document.getElementById("input-mode-select");
+const leftMappingModeSelect = document.getElementById("left-mapping-mode-select");
+const rightMappingModeSelect = document.getElementById("right-mapping-mode-select");
+const singleArmFields = document.getElementById("single-arm-fields");
+const bimanualFields = document.getElementById("bimanual-fields");
+const applyInputButton = document.getElementById("apply-input");
+const inputSelectionText = document.getElementById("input-selection");
 const canvas = document.getElementById("xr-canvas");
 
+const HANDS = ["left", "right"];
+// Touch Plus gamepad button indices: 0 trigger, 1 grip.
+const TRIGGER_BUTTON = 0;
+const GRIP_BUTTON = 1;
+
+const INPUT_SELECTION_STORAGE_KEY = "widowxai.inputSelection";
+const query = new URL(location.href).searchParams;
+
+function savedInputSelection() {
+  try {
+    const value = JSON.parse(localStorage.getItem(INPUT_SELECTION_STORAGE_KEY) || "null");
+    return value && typeof value === "object" ? value : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+const savedSelection = savedInputSelection();
+const requestedHand = query.get("hand") || savedSelection.hand || "left";
+const requestedMappingMode = query.get("mode") || savedSelection.mappingMode || "real";
+const requestedInputMode = query.get("input") || savedSelection.inputMode || "single";
+let selectedHand = requestedHand === "right" ? "right" : "left";
+let selectedMappingMode = requestedMappingMode === "mirror" ? "mirror" : "real";
+// "single" keeps the validated one-arm packet. "bimanual" emits schema v2 with
+// both controllers captured in the same XRFrame.
+let selectedInputMode = requestedInputMode === "bimanual" ? "bimanual" : "single";
+let handMappingModes = {
+  left: (savedSelection.handMappingModes || {}).left === "mirror" ? "mirror" : "real",
+  right: (savedSelection.handMappingModes || {}).right === "mirror" ? "mirror" : "real",
+};
+let wristOffsetStorageKey = `widowxai.${selectedHand}WristOffset`;
 let socket = null;
 let session = null;
 let sessionMode = "immersive-vr";
@@ -21,12 +62,80 @@ let sequence = 0;
 let captured = 0;
 let sent = 0;
 let coalesced = 0;
-let leftInputSource = null;
-let wristOffset = JSON.parse(localStorage.getItem("widowxai.leftWristOffset") || "null");
+let selectedInputSource = null;
+// Lock the operator's intended forward direction when passthrough starts.
+// Otherwise placing the headset down can rotate the task frame on re-clutch.
+let operatorHead = null;
+let wristOffset = JSON.parse(localStorage.getItem(wristOffsetStorageKey) || "null");
 let calibrationArmed = wristOffset === null;
 let calibrationStartedAt = null;
 let calibrationSamples = [];
-calibrationText.textContent = wristOffset ? `${wristOffset.map((v) => v.toFixed(3)).join(", ")} m` : "Not calibrated";
+// Bimanual mode needs both hands' pivots live at once, so it keeps its own
+// per-hand store rather than the single-arm page's one active offset.
+let wristOffsets = {left: null, right: null};
+let calibratingHand = null;
+
+function loadWristOffsets() {
+  for (const hand of HANDS) {
+    wristOffsets[hand] = JSON.parse(localStorage.getItem(`widowxai.${hand}WristOffset`) || "null");
+  }
+}
+
+function offsetLabel(offset) {
+  return offset ? `${offset.map((v) => v.toFixed(3)).join(", ")} m` : "Not calibrated";
+}
+
+function mappingModeLabel(mode = selectedMappingMode) {
+  return mode === "mirror"
+    ? "Mirrored (left/right, front/back, screw, and nod-no flipped)"
+    : "Behind / Parallel (matched motion)";
+}
+
+function isBimanual() {
+  return selectedInputMode === "bimanual";
+}
+
+function refreshInputSelection() {
+  wristOffsetStorageKey = `widowxai.${selectedHand}WristOffset`;
+  wristOffset = JSON.parse(localStorage.getItem(wristOffsetStorageKey) || "null");
+  loadWristOffsets();
+  calibrationArmed = false;
+  calibrationStartedAt = null;
+  calibrationSamples = [];
+  calibratingHand = null;
+  handSelect.value = selectedHand;
+  mappingModeSelect.value = selectedMappingMode;
+  inputModeSelect.value = selectedInputMode;
+  leftMappingModeSelect.value = handMappingModes.left;
+  rightMappingModeSelect.value = handMappingModes.right;
+  singleArmFields.hidden = isBimanual();
+  bimanualFields.hidden = !isBimanual();
+
+  if (isBimanual()) {
+    calibrationText.textContent = `left ${offsetLabel(wristOffsets.left)} · right ${offsetLabel(wristOffsets.right)}`;
+    controllerDescription.textContent =
+      "This page streams BOTH Meta Quest controllers in one timestamped frame. " +
+      "Each grip clutches its own arm; each trigger drives that arm's gripper.";
+    inputSelectionText.textContent =
+      `Active: bimanual · left ${mappingModeLabel(handMappingModes.left)} · right ${mappingModeLabel(handMappingModes.right)}`;
+  } else {
+    calibrationArmed = wristOffset === null;
+    calibrationText.textContent = offsetLabel(wristOffset);
+    controllerDescription.textContent = `This page streams the ${selectedHand} Meta Quest controller using ${mappingModeLabel().toLowerCase()}. Grip is the clutch; trigger controls the gripper.`;
+    inputSelectionText.textContent = `Active: ${selectedHand} controller · ${mappingModeLabel()}`;
+  }
+}
+
+function setInputControlsDisabled(disabled) {
+  handSelect.disabled = disabled;
+  mappingModeSelect.disabled = disabled;
+  inputModeSelect.disabled = disabled;
+  leftMappingModeSelect.disabled = disabled;
+  rightMappingModeSelect.disabled = disabled;
+  applyInputButton.disabled = disabled;
+}
+
+refreshInputSelection();
 
 function setStatus(text, ok = false) {
   statusText.textContent = text;
@@ -63,9 +172,16 @@ function connectRelay() {
   socket.onmessage = (event) => {
     let message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
-    if (message.type === "haptic" && leftInputSource && leftInputSource.gamepad) {
-      const actuator = leftInputSource.gamepad.hapticActuators?.[0];
+    if (message.type === "haptic") {
+      const requestedHand = message.hand === "left" || message.hand === "right" ? message.hand : null;
+      const hapticSource = requestedHand && session
+        ? Array.from(session.inputSources).find((source) => source.handedness === requestedHand)
+        : selectedInputSource;
+      const actuator = hapticSource?.gamepad?.hapticActuators?.[0];
       if (actuator) actuator.pulse(Math.max(0, Math.min(1, Number(message.intensity) || 0)), Number(message.duration_ms) || 40);
+    }
+    if (message.type === "calibration_prompt" && typeof message.text === "string") {
+      setStatus(message.text, true);
     }
   };
 }
@@ -98,6 +214,18 @@ function transformObject(transform, offset = [0, 0, 0]) {
     position: shiftedPosition(transform, offset),
     orientation_xyzw: [transform.orientation.x, transform.orientation.y, transform.orientation.z, transform.orientation.w],
   };
+}
+
+function sendLatestPacket() {
+  if (!latestPacket || !socket || socket.readyState !== WebSocket.OPEN) return false;
+  if (socket.bufferedAmount > 2048) return false;
+  const packet = latestPacket;
+  latestPacket = null;
+  packet.send_monotonic_ms = performance.now();
+  socket.send(JSON.stringify(packet));
+  sent += 1;
+  sentText.textContent = sent;
+  return true;
 }
 
 function solve3x3(a, b) {
@@ -145,15 +273,111 @@ function finishWristCalibration() {
       for (let k = 0; k < 3; k += 1) rhs[row] += dr[k*3 + row] * dp[k];
     }
   }
-  wristOffset = solve3x3(normal, rhs.map((value) => -value));
-  const norm = Math.hypot(...wristOffset);
+  const solved = solve3x3(normal, rhs.map((value) => -value));
+  const norm = Math.hypot(...solved);
   if (!Number.isFinite(norm) || norm > 0.20) throw new Error("offset failed sanity check");
-  localStorage.setItem("widowxai.leftWristOffset", JSON.stringify(wristOffset));
-  calibrationText.textContent = `${wristOffset.map((v) => v.toFixed(3)).join(", ")} m`;
+  const hand = calibratingHand || selectedHand;
+  localStorage.setItem(`widowxai.${hand}WristOffset`, JSON.stringify(solved));
+  loadWristOffsets();
+  if (isBimanual()) {
+    calibrationText.textContent = `left ${offsetLabel(wristOffsets.left)} · right ${offsetLabel(wristOffsets.right)}`;
+  } else {
+    wristOffset = solved;
+    calibrationText.textContent = offsetLabel(wristOffset);
+  }
   calibrationArmed = false;
   calibrationStartedAt = null;
   calibrationSamples = [];
-  setStatus("Wrist calibrated; streaming", true);
+  calibratingHand = null;
+  setStatus(`${hand} wrist calibrated; streaming`, true);
+}
+
+function bimanualControllerBlock(frame, inputSource, hand) {
+  // Absent source, absent gripSpace, and a null getPose all mean the same
+  // thing to the robot: this controller is not tracked right now. Report it
+  // explicitly so the coordinator holds that arm instead of replaying a stale
+  // pose it cannot distinguish from a live one.
+  if (!inputSource || !inputSource.gripSpace) {
+    return {tracked: false, mapping_mode: handMappingModes[hand]};
+  }
+  const pose = frame.getPose(inputSource.gripSpace, referenceSpace);
+  if (!pose || pose.emulatedPosition) {
+    return {tracked: false, mapping_mode: handMappingModes[hand]};
+  }
+  return {
+    tracked: true,
+    mapping_mode: handMappingModes[hand],
+    ...transformObject(pose.transform, wristOffsets[hand] || [0, 0, 0]),
+    grip: buttonValue(inputSource.gamepad, GRIP_BUTTON),
+    trigger: buttonValue(inputSource.gamepad, TRIGGER_BUTTON),
+  };
+}
+
+function onBimanualFrame(frameTime, frame, viewerPose, inputSources) {
+  // Per-hand wrist calibration uses that hand's own grip+trigger chord. The
+  // single-arm both-grips chord would collide with the bimanual clutch.
+  if (calibrationArmed && calibrationStartedAt === null) {
+    for (const hand of HANDS) {
+      const source = inputSources[hand];
+      if (!source) continue;
+      if (
+        buttonValue(source.gamepad, GRIP_BUTTON) >= 0.7 &&
+        buttonValue(source.gamepad, TRIGGER_BUTTON) >= 0.7
+      ) {
+        calibratingHand = hand;
+        calibrationStartedAt = frameTime;
+        calibrationSamples = [];
+        setStatus(`Calibrating ${hand} wrist: rotate it while keeping its pivot still`, true);
+        break;
+      }
+    }
+  }
+  if (calibrationStartedAt !== null) {
+    const source = inputSources[calibratingHand];
+    const pose = source && source.gripSpace ? frame.getPose(source.gripSpace, referenceSpace) : null;
+    if (pose) {
+      calibrationSamples.push({
+        p: [pose.transform.position.x, pose.transform.position.y, pose.transform.position.z],
+        r: rotationMatrix(pose.transform),
+      });
+    }
+    if (frameTime - calibrationStartedAt >= 5000) {
+      try { finishWristCalibration(); }
+      catch (error) {
+        calibrationStartedAt = null;
+        calibrationSamples = [];
+        calibratingHand = null;
+        setStatus(`Wrist calibration failed: ${error.message}`);
+      }
+    }
+    return;
+  }
+
+  const left = bimanualControllerBlock(frame, inputSources.left, "left");
+  const right = bimanualControllerBlock(frame, inputSources.right, "right");
+  // Unlike the single-arm page this never drops the frame when one controller
+  // is missing. One shared sequence number keeps the two arms aligned, and a
+  // gap in it is what the relay-loss watchdog is allowed to react to.
+  const nextPacket = {
+    type: "bimanual_pose",
+    schema_version: 2,
+    input_mode: "bimanual",
+    sequence: sequence++,
+    capture_monotonic_ms: frameTime,
+    capture_epoch_ms: performance.timeOrigin + frameTime,
+    enqueue_monotonic_ms: performance.now(),
+    send_monotonic_ms: 0,
+    left: left,
+    right: right,
+    head: viewerPose ? transformObject(viewerPose.transform) : null,
+    operator_head: operatorHead,
+  };
+  if (latestPacket !== null) coalesced += 1;
+  latestPacket = nextPacket;
+  captured += 1;
+  sendLatestPacket();
+  capturedText.textContent = captured;
+  coalescedText.textContent = coalesced;
 }
 
 function onXRFrame(frameTime, frame) {
@@ -163,15 +387,30 @@ function onXRFrame(frameTime, frame) {
   else gl.clearColor(0.025, 0.055, 0.10, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
+  const viewerPose = frame.getViewerPose(referenceSpace);
+  if (operatorHead === null && viewerPose) {
+    operatorHead = transformObject(viewerPose.transform);
+    setStatus("Operator forward locked; streaming", true);
+  }
+
+  const leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
   const rightInputSource = Array.from(session.inputSources).find((source) => source.handedness === "right" && source.gripSpace) || null;
-  const controllerPose = leftInputSource ? frame.getPose(leftInputSource.gripSpace, referenceSpace) : null;
+  selectedInputSource = selectedHand === "right" ? rightInputSource : leftInputSource;
+
+  if (isBimanual()) {
+    onBimanualFrame(frameTime, frame, viewerPose, {left: leftInputSource, right: rightInputSource});
+    return;
+  }
+
+  const controllerPose = selectedInputSource ? frame.getPose(selectedInputSource.gripSpace, referenceSpace) : null;
   if (!controllerPose) return;
-  const bothGrips = buttonValue(leftInputSource.gamepad, 1) >= 0.7 && buttonValue(rightInputSource?.gamepad, 1) >= 0.7;
-  if (calibrationArmed && calibrationStartedAt === null && bothGrips) {
+  const calibrationChord = selectedHand === "right"
+    ? buttonValue(selectedInputSource?.gamepad, 1) >= 0.7 && buttonValue(selectedInputSource?.gamepad, 0) >= 0.7
+    : buttonValue(leftInputSource?.gamepad, 1) >= 0.7 && buttonValue(rightInputSource?.gamepad, 1) >= 0.7;
+  if (calibrationArmed && calibrationStartedAt === null && calibrationChord) {
     calibrationStartedAt = frameTime;
     calibrationSamples = [];
-    setStatus("Calibrating: twist both wrists, keep wrist pivots still", true);
+    setStatus(`Calibrating ${selectedHand} wrist: rotate it while keeping its pivot still`, true);
   }
   if (calibrationStartedAt !== null) {
     calibrationSamples.push({
@@ -188,42 +427,37 @@ function onXRFrame(frameTime, frame) {
     }
     return;
   }
-  const viewerPose = frame.getViewerPose(referenceSpace);
   const nextPacket = {
     type: "pose",
     schema_version: 1,
+    selected_hand: selectedHand,
+    mapping_mode: selectedMappingMode,
     sequence: sequence++,
     capture_monotonic_ms: frameTime,
     capture_epoch_ms: performance.timeOrigin + frameTime,
     enqueue_monotonic_ms: performance.now(),
     send_monotonic_ms: 0,
-    left: {
+    [selectedHand]: {
       ...transformObject(controllerPose.transform, wristOffset || [0, 0, 0]),
-      grip: buttonValue(leftInputSource.gamepad, 1),
-      trigger: buttonValue(leftInputSource.gamepad, 0),
+      grip: buttonValue(selectedInputSource.gamepad, 1),
+      trigger: buttonValue(selectedInputSource.gamepad, 0),
     },
     head: viewerPose ? transformObject(viewerPose.transform) : null,
+    operator_head: operatorHead,
   };
   if (latestPacket !== null) coalesced += 1;
   latestPacket = nextPacket;
   captured += 1;
+  // Send in the same WebXR callback that produced the pose. A separate 120 Hz
+  // timer added an avoidable 0-8.3 ms phase wait before every packet.
+  sendLatestPacket();
   capturedText.textContent = captured;
   coalescedText.textContent = coalesced;
 }
 
-setInterval(() => {
-  if (!latestPacket || !socket || socket.readyState !== WebSocket.OPEN) return;
-  if (socket.bufferedAmount > 2048) return;
-  const packet = latestPacket;
-  latestPacket = null;
-  packet.send_monotonic_ms = performance.now();
-  socket.send(JSON.stringify(packet));
-  sent += 1;
-  sentText.textContent = sent;
-}, 1000 / 120);
-
 enterButton.addEventListener("click", async () => {
   try {
+    operatorHead = null;
     session = await navigator.xr.requestSession(sessionMode, { requiredFeatures: ["local-floor"] });
     gl = canvas.getContext("webgl", {
       xrCompatible: true,
@@ -239,13 +473,21 @@ enterButton.addEventListener("click", async () => {
     session.addEventListener("end", () => {
       session = null;
       latestPacket = null;
+      operatorHead = null;
       enterButton.disabled = false;
       exitButton.disabled = true;
+      setInputControlsDisabled(false);
       setStatus("Relay connected; VR stopped", true);
     });
     enterButton.disabled = true;
     exitButton.disabled = false;
-    setStatus(sessionMode === "immersive-ar" ? "Streaming in passthrough" : "Streaming left controller", true);
+    setInputControlsDisabled(true);
+    setStatus(
+      sessionMode === "immersive-ar"
+        ? `Streaming ${selectedHand} · ${mappingModeLabel()} in passthrough`
+        : `Streaming ${selectedHand} · ${mappingModeLabel()} in VR`,
+      true,
+    );
     session.requestAnimationFrame(onXRFrame);
   } catch (error) {
     setStatus(`Unable to enter VR: ${error.message}`);
@@ -253,11 +495,45 @@ enterButton.addEventListener("click", async () => {
 });
 
 exitButton.addEventListener("click", () => session?.end());
+applyInputButton.addEventListener("click", () => {
+  if (session) {
+    setStatus("Exit VR before changing controller input");
+    return;
+  }
+  selectedHand = handSelect.value === "right" ? "right" : "left";
+  selectedMappingMode = mappingModeSelect.value === "mirror" ? "mirror" : "real";
+  selectedInputMode = inputModeSelect.value === "bimanual" ? "bimanual" : "single";
+  handMappingModes = {
+    left: leftMappingModeSelect.value === "mirror" ? "mirror" : "real",
+    right: rightMappingModeSelect.value === "mirror" ? "mirror" : "real",
+  };
+  localStorage.setItem(INPUT_SELECTION_STORAGE_KEY, JSON.stringify({
+    hand: selectedHand,
+    mappingMode: selectedMappingMode,
+    inputMode: selectedInputMode,
+    handMappingModes: handMappingModes,
+  }));
+  refreshInputSelection();
+  setStatus(
+    isBimanual()
+      ? "Input set to bimanual (both controllers); enter passthrough"
+      : `Input set to ${selectedHand} · ${mappingModeLabel()}; enter passthrough`,
+    true,
+  );
+});
 calibrateButton.addEventListener("click", () => {
   calibrationArmed = true;
   calibrationStartedAt = null;
   calibrationSamples = [];
-  calibrationText.textContent = "Armed: squeeze both grips in VR";
-  setStatus("Enter VR, squeeze both grips, then twist wrists for 5 seconds", true);
+  calibratingHand = null;
+  if (isBimanual()) {
+    const chord = "hold one controller's grip + trigger";
+    calibrationText.textContent = `Armed for bimanual wrists: ${chord} in VR`;
+    setStatus(`Enter VR, ${chord}, then rotate that wrist for 5 seconds; repeat for the other hand`, true);
+    return;
+  }
+  const chord = selectedHand === "right" ? "hold right grip + right trigger" : "squeeze both grip buttons";
+  calibrationText.textContent = `Armed for ${selectedHand} wrist: ${chord} in VR`;
+  setStatus(`Enter VR, ${chord}, then rotate the ${selectedHand} wrist for 5 seconds`, true);
 });
 connectRelay();

@@ -12,9 +12,11 @@ import numpy as np
 from widowxai_quest_teleop.clutch import ClutchController
 from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
+from widowxai_quest_teleop.gripper import trigger_to_gripper_position
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
-from widowxai_quest_teleop.pose_filter import pose_ema
+from widowxai_quest_teleop.motion_limiter import bounded_command_period, limiter_from_config
+from widowxai_quest_teleop.pose_filter import ControllerPoseFilter
 from widowxai_quest_teleop.telemetry import TelemetryLogger
 from widowxai_quest_teleop.types import Pose
 
@@ -44,12 +46,25 @@ def main() -> None:
     )
     clutch = ClutchController(mapper)
     sim_data = mujoco.MjData(model.model)
-    gripper_q = 0.044
+    hardware = config.get("hardware", {})
+    gripper_open = float(hardware.get("gripper_open_m", 0.044))
+    gripper_closed = float(hardware.get("gripper_min_demo_m", 0.0))
+    gripper_q = gripper_open
     model.set_viewer_qpos(sim_data, q_start, gripper_q)
+    q_des = q_start.copy()
     q_command = q_start.copy()
+    joint_limiter = limiter_from_config(
+        config["control"].get("joint_command_limits"),
+        q_command,
+    )
+    gripper_limiter = limiter_from_config(
+        config["control"].get("gripper_command_limits"),
+        np.array([gripper_q]),
+    )
     filtered_controller = None
     loop_hz = float(config["control"]["loop_rate_hz"])
-    filter_alpha = float(config["control"]["pose_filter_alpha"])
+    quest_synchronized = config["control"].get("update_mode") == "quest_synchronized"
+    controller_filter = ControllerPoseFilter(config["control"])
     previous_sequence = None
     previous_capture_ms = None
     replayed = 0
@@ -79,8 +94,14 @@ def main() -> None:
             )
             diagnostics = None
             target = None
-            for _ in range(max(1, round(float(dt) * loop_hz))):
-                filtered_controller = pose_ema(filtered_controller, controller, filter_alpha)
+            limiter_flags: list[str] = []
+            iterations = 1 if quest_synchronized else max(1, round(float(dt) * loop_hz))
+            step_dt = bounded_command_period(float(dt) / iterations, loop_hz)
+            for _ in range(iterations):
+                filtered_controller = controller_filter.update(
+                    controller,
+                    capture_ms / 1000.0,
+                )
                 robot_pose, wrist_pose = model.fk(q_command)
                 target = clutch.update(
                     grip=float(row.get("quest_grip") or 0.0),
@@ -91,11 +112,36 @@ def main() -> None:
                     head_quaternion_wxyz=head_quaternion,
                 )
                 if target is not None:
-                    q_command, diagnostics = solver.solve(target, q_command)
+                    q_des, diagnostics = solver.solve(target, q_command)
+                    if joint_limiter is None:
+                        q_command = q_des.copy()
+                    else:
+                        joint_result = joint_limiter.step(q_des, step_dt)
+                        q_command = joint_result.command
+                        limiter_flags.extend(joint_result.flags("joint"))
             if mapper.engaged:
-                gripper_q = 0.044 * (1.0 - np.clip(float(row.get("quest_trigger") or 0.0), 0.0, 1.0))
+                gripper_des = trigger_to_gripper_position(
+                    float(row.get("quest_trigger") or 0.0),
+                    gripper_open,
+                    gripper_closed,
+                )
+                if gripper_limiter is None:
+                    gripper_q = gripper_des
+                else:
+                    gripper_result = gripper_limiter.step(
+                        np.array([gripper_des]),
+                        bounded_command_period(float(dt), loop_hz),
+                    )
+                    gripper_q = float(gripper_result.command[0])
+                    limiter_flags.extend(gripper_result.flags("gripper"))
             else:
                 filtered_controller = None
+                controller_filter.reset()
+                gripper_des = gripper_q
+                if joint_limiter is not None:
+                    joint_limiter.reset(q_command)
+                if gripper_limiter is not None:
+                    gripper_limiter.reset(np.array([gripper_q]))
             model.set_viewer_qpos(sim_data, q_command, gripper_q)
             telemetry.log(
                 pc_epoch_ns=time.time_ns(),
@@ -109,11 +155,16 @@ def main() -> None:
                 reanchor_generation=mapper.reanchor_generation,
                 raw_controller_position=controller.position,
                 raw_controller_quaternion_wxyz=controller.quaternion_wxyz,
+                pose_filter_rotation_alpha=controller_filter.rotation_alpha,
+                pose_filter_rotation_cutoff_hz=controller_filter.rotation_cutoff_hz,
                 mapped_target_position="" if target is None else target.position,
                 mapped_target_quaternion_wxyz="" if target is None else target.quaternion_wxyz,
-                q_des=q_command,
+                q_des=q_des,
                 q_cmd=q_command,
                 q_feedback=sim_data.qpos[model.qpos_indices].copy(),
+                gripper_des_m=gripper_des,
+                gripper_cmd_m=gripper_q,
+                gripper_feedback_m=gripper_q,
                 position_residual_m="" if diagnostics is None else diagnostics.position_residual_m,
                 orientation_residual_rad="" if diagnostics is None else diagnostics.orientation_residual_rad,
                 position_manipulability="" if diagnostics is None else diagnostics.position_manipulability,
@@ -123,7 +174,7 @@ def main() -> None:
                 ik_step_norm_rad="" if diagnostics is None else diagnostics.step_norm_rad,
                 minimum_joint_limit_margin_rad="" if diagnostics is None else diagnostics.minimum_joint_limit_margin_rad,
                 ik_status="" if diagnostics is None else diagnostics.status,
-                limiter_flags="",
+                limiter_flags="|".join(limiter_flags),
             )
             replayed += 1
         run_dir = telemetry.run_dir

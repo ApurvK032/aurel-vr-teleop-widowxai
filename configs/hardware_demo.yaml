@@ -6,8 +6,9 @@ model:
   xml_path: third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/wxai_follower.xml
   end_effector_site: ee_site
   wrist_anchor_site: wrist_anchor
-  # Official Trossen WidowXAI staged posture used by the startup ramp.
-  simulation_start_q_rad: [0.0, 1.0471975512, 0.5235987756, 0.6283185307, 0.0, 0.0]
+  # Confirmed lab home: [0, 60, 75, -60, 0, 0] degrees. Used by the
+  # simulation start, IK rest bias, and startup ramp.
+  simulation_start_q_rad: [0.0, 1.0471975512, 1.3089969390, -1.0471975512, 0.0, 0.0]
 
 quest:
   hand: left
@@ -15,9 +16,9 @@ quest:
   stale_timeout_s: 0.100
   fresh_samples_to_recover: 3
   calibration: configs/calibrations/left_behind_full_pose_good_20260602.json
-  # 50% of the article defaults (1.5 x 0.5), applied immediately in pose space.
-  translation_scale: 0.75
-  rotation_scale: 0.75
+  # Article/reference-kit pose-space gains, unchanged for WidowXAI.
+  translation_scale: 1.5
+  rotation_scale: 1.5
   position_reach_limit_m: 0.25
   rotation_reach_limit_rad: 0.60
 
@@ -35,24 +36,30 @@ ik:
   lambda_rotation_extra: 0.40
   rotation_manipulability_threshold: 0.50
   orientation_hold_error_rad: 2.20
-  # About 50% of the official WidowXAI velocity limits at 200 Hz.
-  max_dq_per_joint_rad: [0.015, 0.015, 0.015, 0.023, 0.023, 0.023]
+  # Reference-kit per-tick bounds: arm group 0.06 rad, wrist group 0.24 rad.
+  max_dq_per_joint_rad: [0.06, 0.06, 0.06, 0.24, 0.24, 0.24]
 
 hardware:
   enabled: true
   robot_ip: null
+  # Comparison-only profile. Select an explicit profile before constructing a driver.
+  end_effector_profile: null
   require_explicit_enable: true
   driver_package: trossen-arm
   driver_version_tested: 1.11.0
+  # Reference behavior: immediate, nonblocking position commands.
+  command_goal_time_s: 0.0
   startup_ramp_duration_s: 5.0
   startup_ramp_rate_hz: 50
+  startup_collision_samples: 251
   max_demo_duration_s: 120.0
   joint_limit_margin_rad: 0.05
   max_feedback_error_rad: 0.25
+  max_gripper_feedback_error_m: 0.005
   feedback_check_rate_hz: 20
   gripper_open_m: 0.044
-  gripper_min_demo_m: 0.022
-  max_gripper_delta_m: 0.001
+  gripper_min_demo_m: 0.0
+  max_gripper_delta_m: 0.044
 
 telemetry:
   output_dir: runs

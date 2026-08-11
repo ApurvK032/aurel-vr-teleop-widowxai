@@ -46,3 +46,20 @@ class LatestValueMailbox(Generic[T]):
                 self._condition.wait(remaining)
             return self._value, self._generation
 
+    def wait_take_latest(
+        self,
+        generation: int,
+        timeout_s: float | None = None,
+    ) -> tuple[T | None, int]:
+        """Wait for a newer generation and atomically consume its latest value."""
+
+        deadline = None if timeout_s is None else monotonic() + timeout_s
+        with self._condition:
+            while self._generation <= generation:
+                remaining = None if deadline is None else deadline - monotonic()
+                if remaining is not None and remaining <= 0.0:
+                    return None, self._generation
+                self._condition.wait(remaining)
+            value = self._value
+            self._value = None
+            return value, self._generation

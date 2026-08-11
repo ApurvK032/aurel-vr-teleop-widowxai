@@ -10,7 +10,9 @@ from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
 from widowxai_quest_teleop.math3d import quat_to_matrix
 from widowxai_quest_teleop.model import WidowXAIModel
+from widowxai_quest_teleop.motion_limiter import limiter_from_config
 from widowxai_quest_teleop.telemetry import TelemetryLogger
+from widowxai_quest_teleop.viewer import close_passive_viewer
 
 
 def reference_q(q_start: np.ndarray, elapsed_s: float) -> np.ndarray:
@@ -41,12 +43,18 @@ def main() -> None:
     kinematics = WidowXAIModel(config["model"]["xml_path"])
     solver = DecoupledIK.from_config(kinematics, config)
     q_start = kinematics.clamp_joints(np.asarray(config["model"]["simulation_start_q_rad"], dtype=float))
+    gripper_open = float(config.get("hardware", {}).get("gripper_open_m", 0.044))
 
     sim_data = mujoco.MjData(kinematics.model)
-    kinematics.set_viewer_qpos(sim_data, q_start, 0.044)
+    kinematics.set_viewer_qpos(sim_data, q_start, gripper_open)
 
     loop_hz = float(config["control"]["loop_rate_hz"])
     dt = 1.0 / loop_hz
+    joint_limiter = limiter_from_config(
+        config["control"].get("joint_command_limits"),
+        q_start,
+    )
+    q_des = q_start.copy()
     q_command = q_start.copy()
     diagnostics = None
     viewer = None
@@ -56,7 +64,7 @@ def main() -> None:
         viewer = mujoco_viewer.launch_passive(kinematics.model, sim_data)
 
     started = time.perf_counter()
-    next_tick = started
+    last_command_send_s = started
     tick = 0
     with TelemetryLogger(args.label, config, config["telemetry"]["output_dir"]) as telemetry:
         while time.perf_counter() - started < args.duration:
@@ -65,9 +73,23 @@ def main() -> None:
             target_q = kinematics.clamp_joints(reference_q(q_start, elapsed))
             target_pose, _ = kinematics.fk(target_q)
             ik_start = time.perf_counter_ns()
-            q_command, diagnostics = solver.solve(target_pose, q_command)
+            q_des, diagnostics = solver.solve(target_pose, q_command)
             ik_end = time.perf_counter_ns()
-            kinematics.set_viewer_qpos(sim_data, q_command, 0.044)
+            limiter_flags: list[str] = []
+            if args.realtime or args.viewer:
+                sleep_for = last_command_send_s + dt - time.perf_counter()
+                if sleep_for > 0.0:
+                    time.sleep(sleep_for)
+            limiter_dt = max(1e-6, time.perf_counter() - last_command_send_s)
+            if joint_limiter is None:
+                q_command = q_des.copy()
+            else:
+                joint_result = joint_limiter.step(q_des, limiter_dt)
+                q_command = joint_result.command
+                limiter_flags.extend(joint_result.flags("joint"))
+            kinematics.set_viewer_qpos(sim_data, q_command, gripper_open)
+            command_send_ns = time.perf_counter_ns()
+            last_command_send_s = command_send_ns / 1e9
             q_feedback = sim_data.qpos[kinematics.qpos_indices].copy()
             current_ee, current_wrist = kinematics.fk(q_feedback)
             target_rotation = quat_to_matrix(target_pose.quaternion_wxyz)
@@ -81,14 +103,14 @@ def main() -> None:
                 control_consume_monotonic_ns=int(tick_started * 1e9),
                 ik_start_monotonic_ns=ik_start,
                 ik_end_monotonic_ns=ik_end,
-                command_send_monotonic_ns=time.perf_counter_ns(),
+                command_send_monotonic_ns=command_send_ns,
                 stream_fresh=True,
                 clutch_engaged=False,
                 mapped_target_position=target_pose.position,
                 mapped_target_quaternion_wxyz=target_pose.quaternion_wxyz,
                 wrist_target_position=wrist_target,
                 wrist_current_position=current_wrist.position,
-                q_des=q_command,
+                q_des=q_des,
                 q_cmd=q_command,
                 q_feedback=q_feedback,
                 position_residual_m="" if diagnostics is None else diagnostics.position_residual_m,
@@ -100,23 +122,16 @@ def main() -> None:
                 ik_step_norm_rad="" if diagnostics is None else diagnostics.step_norm_rad,
                 minimum_joint_limit_margin_rad="" if diagnostics is None else diagnostics.minimum_joint_limit_margin_rad,
                 ik_status="" if diagnostics is None else diagnostics.status,
-                limiter_flags="",
+                limiter_flags="|".join(limiter_flags),
             )
             if viewer is not None:
                 viewer.sync()
                 if not viewer.is_running():
                     break
             tick += 1
-            if args.realtime or args.viewer:
-                next_tick += dt
-                sleep_for = next_tick - time.perf_counter()
-                if sleep_for > 0.0:
-                    time.sleep(sleep_for)
-                else:
-                    next_tick = time.perf_counter()
         run_dir = telemetry.run_dir
     if viewer is not None:
-        viewer.close()
+        close_passive_viewer(viewer)
     print(f"simulation complete: {tick} command ticks")
     print(f"telemetry: {run_dir}")
 

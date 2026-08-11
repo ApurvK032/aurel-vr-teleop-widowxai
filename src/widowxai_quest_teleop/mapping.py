@@ -19,10 +19,11 @@ from .types import Pose
 class ClutchPoseMapper:
     """Incremental, clutch-relative Quest-to-WidowXAI pose mapping.
 
-    Vectors are columns. Translation uses ``p_arm = M_position @ p_quest``.
+    Vectors are columns. Translation uses
+    ``p_arm = task_position_signs * (M_position @ p_quest)``.
     Controller world-frame rotation deltas are mapped by matrix conjugation:
     ``dR_arm = M_rotation @ dR_quest @ M_rotation.T``. The calibrated task
-    signs are applied to the resulting arm-frame rotation vector.
+    rotation signs are applied to the resulting arm-frame rotation vector.
     """
 
     def __init__(
@@ -44,7 +45,16 @@ class ClutchPoseMapper:
         self.calibrated_rotation_matrix = np.asarray(calibration[rotation_key], dtype=float).reshape(3, 3)
         self.position_matrix = self.calibrated_position_matrix.copy()
         self.rotation_matrix = self.calibrated_rotation_matrix.copy()
+        self.position_signs = np.asarray(
+            calibration.get("task_position_signs", [1.0, 1.0, 1.0]),
+            dtype=float,
+        ).reshape(3)
         self.rotation_signs = np.asarray(calibration[signs_key], dtype=float).reshape(3)
+        if (
+            np.any(~np.isfinite(self.position_signs))
+            or not np.allclose(np.abs(self.position_signs), 1.0, atol=1e-12)
+        ):
+            raise ValueError("task_position_signs must contain three +1/-1 values")
         self.translation_scale = float(translation_scale)
         self.rotation_scale = float(rotation_scale)
         self.position_reach_limit_m = position_reach_limit_m
@@ -101,8 +111,12 @@ class ClutchPoseMapper:
         if self._previous_controller is None or self._target is None or self._pivot is None:
             raise RuntimeError("mapper is engaged without anchor state")
 
-        translation_increment = self.position_matrix @ (
-            self.translation_scale * (controller.position - self._previous_controller.position)
+        translation_increment = self.position_signs * (
+            self.position_matrix
+            @ (
+                self.translation_scale
+                * (controller.position - self._previous_controller.position)
+            )
         )
         previous_target_rotation = quat_to_matrix(self._target.quaternion_wxyz)
         controller_now_rotation = quat_to_matrix(controller.quaternion_wxyz)

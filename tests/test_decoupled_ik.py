@@ -61,3 +61,21 @@ def test_reference_per_tick_joint_delta_caps_are_applied_once(model: WidowXAIMod
     caps = np.asarray(config["ik"]["max_dq_per_joint_rad"])
     assert np.all(np.abs(result - q) <= caps + 1e-12)
     assert diagnostics.iterations == 1
+
+
+def test_deployment_joint_margin_is_absorbing_not_a_gate_failure(model: WidowXAIModel) -> None:
+    config = load_config()
+    solver = DecoupledIK.from_config(model, config)
+    deployment_limits = model.joint_limits.copy()
+    deployment_limits[:, 0] += 0.05
+    deployment_limits[:, 1] -= 0.05
+    solver.set_joint_limits(deployment_limits)
+
+    q = np.array(config["model"]["simulation_start_q_rad"], dtype=float)
+    pose, _ = model.fk(q)
+    target = type(pose)(pose.position + np.array([3.0, 3.0, 3.0]), pose.quaternion_wxyz)
+    for _ in range(500):
+        q, diagnostics = solver.solve(target, q)
+    assert np.all(q >= deployment_limits[:, 0] - 1e-12)
+    assert np.all(q <= deployment_limits[:, 1] + 1e-12)
+    assert diagnostics.minimum_joint_limit_margin_rad >= -1e-12
