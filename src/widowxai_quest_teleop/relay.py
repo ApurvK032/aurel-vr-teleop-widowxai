@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 
 WEB_ROOT = Path(__file__).with_name("web")
+LATEST_STATE_MESSAGE_TYPES = frozenset(("pose", "bimanual_pose"))
 
 
 @dataclass(eq=False)
@@ -27,6 +28,7 @@ class LatestStateHub:
         self.clients: set[Client] = set()
         self.connection_generation = 0
         self.pose_messages = 0
+        self.pose_messages_by_type = {message_type: 0 for message_type in LATEST_STATE_MESSAGE_TYPES}
         self.overwritten_pose_messages = 0
 
     async def register(self, websocket: WebSocket) -> Client:
@@ -39,8 +41,11 @@ class LatestStateHub:
     def unregister(self, client: Client) -> None:
         self.clients.discard(client)
 
-    def publish_pose(self, message: str, source: Client) -> None:
+    def publish_pose(self, message: str, source: Client, *, message_type: str) -> None:
+        if message_type not in LATEST_STATE_MESSAGE_TYPES:
+            raise ValueError(f"unsupported latest-state message type: {message_type!r}")
         self.pose_messages += 1
+        self.pose_messages_by_type[message_type] += 1
         for client in tuple(self.clients):
             if client is source:
                 continue
@@ -90,6 +95,7 @@ async def health() -> JSONResponse:
             "status": "ok",
             "clients": len(hub.clients),
             "pose_messages": hub.pose_messages,
+            "pose_messages_by_type": dict(hub.pose_messages_by_type),
             "overwritten_pose_messages": hub.overwritten_pose_messages,
         }
     )
@@ -123,11 +129,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 continue
             message_type = payload.get("type")
-            if message_type == "pose":
+            if message_type in LATEST_STATE_MESSAGE_TYPES:
                 payload["relay_arrival_monotonic_ns"] = time.perf_counter_ns()
                 payload["relay_arrival_epoch_ns"] = time.time_ns()
                 payload["reconnect_generation"] = client.generation
-                hub.publish_pose(json.dumps(payload, separators=(",", ":")), client)
+                hub.publish_pose(
+                    json.dumps(payload, separators=(",", ":")),
+                    client,
+                    message_type=message_type,
+                )
             elif message_type == "clock_ping":
                 response = {
                     "type": "clock_pong",
@@ -161,4 +171,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

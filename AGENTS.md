@@ -826,6 +826,30 @@ Then inspect `runs/manifest.csv`, the exact config snapshot, summary row count,
 IK failures, freshness/reanchor events, command spacing, and tail latency before
 changing another variable.
 
+## Dual stabilization log
+
+### 2026-08-11 — Milestone 1: bimanual latest-state relay
+
+- Work is isolated on the local `dual-stabilization` branch; the accepted
+  single-arm profiles and launchers were not changed.
+- Root cause: the relay recognized only the schema-v1 `pose` type as control
+  state. Schema-v2 `bimanual_pose` messages fell through to the 32-entry event
+  FIFO, received no relay timestamps or reconnect generation, and were absent
+  from pose health counts. Under backpressure, obsolete bimanual frames could
+  therefore queue and still look fresh when the PC finally parsed them.
+- `pose` and `bimanual_pose` now share the capacity-one latest-state path. Both
+  receive relay monotonic/epoch timestamps and the source connection generation.
+  `/health` retains the aggregate `pose_messages` count and adds per-type counts.
+- `scripts/smoke_test_relay.py` now uses an ephemeral loopback port and exercises
+  a real relay, a raw subscriber, the actual `BimanualQuestReceiver` mailbox,
+  both schemas, and a browser/source reconnect. Unit coverage pins capacity-one
+  overwrite behavior and rejects accidental routing of unknown event types.
+- Verification: focused relay/transport suite `20 passed`; standalone relay
+  smoke passed; full `.venv` suite `204 passed`; full no-arm `.venv-arm18` suite
+  `204 passed`. No Quest or arm was connected and no physical command was sent.
+- Next milestone: make dual feedback freshness/timestamps truthful and preserve
+  the faulting joint sample before a safety-stop exception leaves the loop.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
