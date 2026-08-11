@@ -127,6 +127,7 @@ class ArmPlacement:
 
     position_m: np.ndarray
     quaternion_wxyz: np.ndarray
+    measurement_status: str = "synthetic"
 
     def __post_init__(self) -> None:
         position = np.asarray(self.position_m, dtype=float).reshape(3).copy()
@@ -136,8 +137,18 @@ class ArmPlacement:
         norm = float(np.linalg.norm(quaternion))
         if norm < 1e-9:
             raise DualArmConfigError("arm base quaternion must be non-degenerate")
+        status = str(self.measurement_status).strip().lower()
+        if status not in ("placeholder", "measured", "synthetic"):
+            raise DualArmConfigError(
+                "arm base measurement_status must be placeholder, measured, or synthetic"
+            )
         object.__setattr__(self, "position_m", position)
         object.__setattr__(self, "quaternion_wxyz", quaternion / norm)
+        object.__setattr__(self, "measurement_status", status)
+
+    @property
+    def measured(self) -> bool:
+        return self.measurement_status == "measured"
 
 
 @dataclass(frozen=True)
@@ -227,11 +238,17 @@ def _parse_placement(side: str, raw: Any) -> ArmPlacement:
             f"arms.{side}.base_transform is required; measure it against the shared "
             "world frame instead of copying an example"
         )
-    for key in ("position_m", "quaternion_wxyz"):
+    for key in ("position_m", "quaternion_wxyz", "measurement_status"):
         if key not in raw:
             raise DualArmConfigError(f"arms.{side}.base_transform.{key} is required")
+    status = str(raw["measurement_status"]).strip().lower()
+    if status not in ("placeholder", "measured"):
+        raise DualArmConfigError(
+            f"arms.{side}.base_transform.measurement_status must be "
+            "'placeholder' or 'measured'"
+        )
     try:
-        return ArmPlacement(raw["position_m"], raw["quaternion_wxyz"])
+        return ArmPlacement(raw["position_m"], raw["quaternion_wxyz"], status)
     except (TypeError, ValueError) as exc:
         raise DualArmConfigError(f"arms.{side}.base_transform is invalid: {exc}") from None
 
@@ -361,6 +378,9 @@ def parse_dual_arm_config(config: dict[str, Any]) -> dict[str, ArmConfig]:
     config["_dual_arm"] = {
         "sides": list(DUAL_ARM_SIDES),
         "base_separation_m": separation_m,
+        "base_transform_status": {
+            side: arms[side].placement.measurement_status for side in DUAL_ARM_SIDES
+        },
         "controller_hands": {side: arms[side].controller_hand for side in DUAL_ARM_SIDES},
         "robot_ips": {side: arms[side].robot_ip for side in DUAL_ARM_SIDES},
         "calibration_status": {
@@ -379,10 +399,11 @@ def require_live_dual_arm_config(
     """Additional gates that only a physical dual-arm run must satisfy.
 
     ``allow_unvalidated_calibrations`` is an explicit operator override for the
-    calibration-acceptance gate only. It never relaxes cross-arm collision,
-    coordinated fault hold, or any joint/stale/feedback/driver/shutdown gate,
-    and it does not modify the calibration files: the pending statuses are
-    returned so the caller can record the override in the run's evidence.
+    calibration-acceptance gate only. It never relaxes measured base geometry,
+    cross-arm collision, coordinated fault hold, or any
+    joint/stale/feedback/driver/shutdown gate, and it does not modify the
+    calibration files: the pending statuses are returned so the caller can
+    record the override in the run's evidence.
     """
 
     safety = config.get("safety", {})
@@ -399,10 +420,26 @@ def require_live_dual_arm_config(
         for side, arm in sorted(arms.items())
         if not arm.calibration_accepted
     }
+    unmeasured = {
+        side: arm.placement.measurement_status
+        for side, arm in sorted(arms.items())
+        if not arm.placement.measured
+    }
     if pending and not allow_unvalidated_calibrations:
+        geometry_note = (
+            ""
+            if not unmeasured
+            else f"; live also requires measured base transforms: {unmeasured}"
+        )
         raise DualArmConfigError(
             "live dual-arm output requires an explicitly accepted calibration for "
-            f"each arm; pending: {pending}"
+            f"each arm; pending: {pending}{geometry_note}"
+        )
+    if unmeasured:
+        raise DualArmConfigError(
+            "live dual-arm output requires a measured base transform for each arm; "
+            f"unmeasured: {unmeasured}. The calibration override does not bypass "
+            "bench geometry."
         )
     if pending:
         # Record the override in the config so TelemetryLogger's config

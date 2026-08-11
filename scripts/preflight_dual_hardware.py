@@ -29,7 +29,8 @@ def offline_checks(config: dict, arms_config: dict) -> None:
         arm = arms_config[side]
         print(
             f"{side:>5} arm: controller={arm.controller_hand} mapping={arm.mapping_mode} "
-            f"ip={arm.robot_ip} calibration={arm.calibration_status}"
+            f"ip={arm.robot_ip} calibration={arm.calibration_status} "
+            f"base={arm.placement.measurement_status}"
         )
     print(f"base separation: {config['_dual_arm']['base_separation_m']:.3f} m")
 

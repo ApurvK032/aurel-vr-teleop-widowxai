@@ -154,6 +154,8 @@ Behind/Parallel calibrations are still candidates. It also requires its own
 Base transforms in `configs/dual_widowxai.yaml` encode a 500 mm separation and
 are **placeholders**. Measure both arm bases against one shared world frame
 before any physical work — every cross-arm collision result depends on them.
+The live gate requires each `base_transform.measurement_status` to be
+`measured`; the calibration override cannot bypass this geometry gate.
 
 Architecture, staged validation, and the definition of done are in
 [`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md).

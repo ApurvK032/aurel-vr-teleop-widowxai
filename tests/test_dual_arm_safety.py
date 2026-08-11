@@ -32,6 +32,11 @@ HOME_Q = np.array([0.0, 1.0471975512, 1.3089969390, -1.0471975512, 0.0, 0.0])
 REST_Q = np.zeros(6)
 
 
+def mark_base_transforms_measured(config: dict) -> None:
+    for side in ("left", "right"):
+        config["arms"][side]["base_transform"]["measurement_status"] = "measured"
+
+
 def yawed(base_yaw_rad: float) -> np.ndarray:
     """A raised pose yawed about the base only.
 
@@ -76,6 +81,8 @@ def test_shipped_dual_profile_loads_and_records_both_arms(dual_config) -> None:
     assert arms["left"].robot_ip == "192.168.1.2"
     assert arms["right"].robot_ip == "192.168.1.3"
     assert dual_config["_dual_arm"]["base_separation_m"] == pytest.approx(0.50)
+    assert arms["left"].placement.measurement_status == "placeholder"
+    assert arms["right"].placement.measurement_status == "placeholder"
     # Each arm uses a calibration measured for its own controller hand.
     assert "left" in arms["left"].calibration
     assert "right" in arms["right"].calibration
@@ -96,6 +103,12 @@ def test_same_controller_hand_on_both_arms_is_rejected(dual_config) -> None:
 def test_missing_base_transform_is_rejected(dual_config) -> None:
     del dual_config["arms"]["right"]["base_transform"]
     with pytest.raises(DualArmConfigError, match="base_transform is required"):
+        parse_dual_arm_config(dual_config)
+
+
+def test_base_transform_measurement_status_must_be_explicit(dual_config) -> None:
+    del dual_config["arms"]["right"]["base_transform"]["measurement_status"]
+    with pytest.raises(DualArmConfigError, match="measurement_status is required"):
         parse_dual_arm_config(dual_config)
 
 
@@ -138,13 +151,17 @@ def test_live_output_is_blocked_while_either_calibration_is_pending(dual_config)
     arms = parse_dual_arm_config(dual_config)
     assert not arms["left"].calibration_accepted
     assert not arms["right"].calibration_accepted
-    with pytest.raises(DualArmConfigError, match="explicitly accepted calibration"):
+    with pytest.raises(
+        DualArmConfigError, match="explicitly accepted calibration"
+    ) as exc_info:
         require_live_dual_arm_config(dual_config, arms)
+    assert "measured base transforms" in str(exc_info.value)
 
 
 def test_operator_override_unblocks_only_the_calibration_gate(dual_config) -> None:
     """The override must not become a general safety bypass."""
 
+    mark_base_transforms_measured(dual_config)
     arms = parse_dual_arm_config(dual_config)
     pending = require_live_dual_arm_config(
         dual_config, arms, allow_unvalidated_calibrations=True
@@ -171,11 +188,23 @@ def test_operator_override_unblocks_only_the_calibration_gate(dual_config) -> No
         )
 
 
+def test_calibration_override_does_not_bypass_placeholder_bases(dual_config) -> None:
+    arms = parse_dual_arm_config(dual_config)
+
+    with pytest.raises(DualArmConfigError, match="measured base transform"):
+        require_live_dual_arm_config(
+            dual_config, arms, allow_unvalidated_calibrations=True
+        )
+
+    assert "calibration_override" not in dual_config["_dual_arm"]
+
+
 def test_override_does_not_modify_the_calibration_files(dual_config) -> None:
     """Acceptance evidence in the repo must never be rewritten by a run."""
 
     from pathlib import Path
 
+    mark_base_transforms_measured(dual_config)
     arms = parse_dual_arm_config(dual_config)
     paths = [Path(arms[side].calibration) for side in ("left", "right")]
     before = [path.read_bytes() for path in paths]

@@ -197,12 +197,18 @@ arms:
     controller_hand: left
     robot_ip: LEFT_ARM_IP
     calibration: configs/calibrations/dual_left_accepted.json
-    base_transform: [MEASURED_LEFT_BASE_TRANSFORM]
+    base_transform:
+      measurement_status: measured
+      position_m: [MEASURED_X, MEASURED_Y, MEASURED_Z]
+      quaternion_wxyz: [MEASURED_W, MEASURED_X, MEASURED_Y, MEASURED_Z]
   right:
     controller_hand: right
     robot_ip: RIGHT_ARM_IP
     calibration: configs/calibrations/dual_right_accepted.json
-    base_transform: [MEASURED_RIGHT_BASE_TRANSFORM]
+    base_transform:
+      measurement_status: measured
+      position_m: [MEASURED_X, MEASURED_Y, MEASURED_Z]
+      quaternion_wxyz: [MEASURED_W, MEASURED_X, MEASURED_Y, MEASURED_Z]
 
 safety:
   cross_arm_collision: true
@@ -218,7 +224,7 @@ Fail configuration loading when:
 - both arms use the same IP;
 - both arms reference the same logical controller hand;
 - either calibration is missing or not explicitly accepted;
-- base transforms are missing;
+- base transforms are missing or not explicitly recorded as measured;
 - cross-arm collision checking is disabled for live output.
 
 ### 3. Dual-arm MuJoCo model

@@ -905,6 +905,33 @@ changing another variable.
 - Next milestone: replace placeholder base transforms with measured bench
   geometry before treating any cross-arm clearance result as physical evidence.
 
+### 2026-08-11 — Milestone 4: placeholder base geometry fails closed
+
+- Root cause: both dual YAML profiles and all operator documentation called the
+  500 mm base transforms placeholders, but the live configuration gate checked
+  only that transforms existed and differed. Supplying the explicit
+  calibration-only override could therefore reach live setup while collision
+  checks still used unmeasured bench geometry.
+- Every configured arm base now has an explicit `measurement_status` of
+  `placeholder` or `measured`. Both shipped dual profiles remain honestly
+  marked `placeholder`; simulation and no-contact preflight continue to work,
+  while live dual output requires `measured` for both arms. There is no geometry
+  override, and the calibration override neither bypasses nor records acceptance
+  for placeholder bases.
+- The no-contact preflight prints each arm's base status and reports all current
+  live blockers. With the shipped Behind profile it still clears the synthetic
+  rest/home and one-arm-moving paths at the placeholder 0.500 m separation, but
+  labels those results as placeholder evidence and contacts no controller.
+- README, configuration catalog, and dual-arm extension instructions now show
+  the required status field and the measured position/quaternion structure.
+- Offline verification: focused dual/config/hardware suite `107 passed`;
+  full `.venv` suite `212 passed`; full no-arm `.venv-arm18` suite `212 passed`;
+  `preflight_dual_hardware.py` passed without `--contact-arms`. No Quest or arm
+  was connected and no physical command was sent.
+- Next physical prerequisite: measure each base position and orientation in one
+  shared world frame. Replace the placeholder numbers and set `measured` only
+  when that measurement has actually been recorded.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.

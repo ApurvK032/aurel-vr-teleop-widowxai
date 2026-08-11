@@ -40,6 +40,7 @@ arms:
     calibration: configs/calibrations/left_behind_all_motions_20260723_candidate.json
     base_transform:
       # PLACEHOLDER: +250 mm across from the shared origin (500 mm total).
+      measurement_status: placeholder
       position_m: [0.0, 0.25, 0.0]
       quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
     # Conservative first-bring-up gains. The accepted single-arm profile runs
@@ -60,6 +61,7 @@ arms:
     calibration: configs/calibrations/right_behind_all_motions_20260723_candidate.json
     base_transform:
       # PLACEHOLDER: -250 mm across from the shared origin (500 mm total).
+      measurement_status: placeholder
       position_m: [0.0, -0.25, 0.0]
       quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
     translation_scale: 0.45

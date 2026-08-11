@@ -85,7 +85,10 @@ and it is validated by `config.parse_dual_arm_config` rather than by the
 single-arm loader.
 
 Its base transforms are placeholders encoding a 500 mm separation. Measure both
-arm bases against one shared world frame before any physical dual-arm work.
+arm bases against one shared world frame before any physical dual-arm work,
+then replace each transform and change its explicit `measurement_status` from
+`placeholder` to `measured`. Live mode rejects any other status, including when
+the calibration-only override is supplied.
 
 Live two-arm output additionally requires an explicitly accepted calibration
 for each arm and the dual `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token. Do
