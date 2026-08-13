@@ -19,7 +19,49 @@ const singleArmFields = document.getElementById("single-arm-fields");
 const bimanualFields = document.getElementById("bimanual-fields");
 const applyInputButton = document.getElementById("apply-input");
 const inputSelectionText = document.getElementById("input-selection");
+const cycleCameraViewButton = document.getElementById("cycle-camera-view");
+const cameraStatusText = document.getElementById("camera-status");
+const cameraViewModeText = document.getElementById("camera-view-mode");
+const cameraSetupStatusText = document.getElementById("camera-setup-status");
+const applyCameraSetupButton = document.getElementById("apply-camera-setup");
+const refreshCamerasButton = document.getElementById("refresh-cameras");
 const canvas = document.getElementById("xr-canvas");
+const CAMERA_ROLES = window.WidowXAICameraView.CAMERA_ROLES;
+const CAMERA_ROLE_LABELS = window.WidowXAICameraView.ROLE_LABELS;
+const CAMERA_SERVICE_URL = `${location.protocol}//${location.hostname}:8444`;
+const cameraControls = {
+  scene: {
+    select: document.getElementById("scene-camera-select"),
+    enabled: document.getElementById("scene-camera-enabled"),
+    card: document.getElementById("scene-preview-card"),
+    caption: document.getElementById("scene-preview-caption"),
+  },
+  left_wrist: {
+    select: document.getElementById("left-wrist-camera-select"),
+    enabled: document.getElementById("left-wrist-camera-enabled"),
+    card: document.getElementById("left-wrist-preview-card"),
+    caption: document.getElementById("left-wrist-preview-caption"),
+  },
+  right_wrist: {
+    select: document.getElementById("right-wrist-camera-select"),
+    enabled: document.getElementById("right-wrist-camera-enabled"),
+    card: document.getElementById("right-wrist-preview-card"),
+    caption: document.getElementById("right-wrist-preview-caption"),
+  },
+};
+let cameraDevices = [];
+const cameraView = new window.WidowXAICameraView.QuestCameraView({
+  previews: {
+    scene: document.getElementById("scene-preview"),
+    left_wrist: document.getElementById("left-wrist-preview"),
+    right_wrist: document.getElementById("right-wrist-preview"),
+  },
+  statusText: cameraStatusText,
+  viewModeText: cameraViewModeText,
+  configurationChanged: () => {
+    cycleCameraViewButton.disabled = !cameraView.canCycle();
+  },
+});
 
 const HANDS = ["left", "right"];
 // Touch Plus gamepad button indices: 0 trigger, 1 grip.
@@ -133,6 +175,106 @@ function setInputControlsDisabled(disabled) {
   leftMappingModeSelect.disabled = disabled;
   rightMappingModeSelect.disabled = disabled;
   applyInputButton.disabled = disabled;
+}
+
+function setCameraControlsDisabled(disabled) {
+  for (const role of CAMERA_ROLES) {
+    cameraControls[role].select.disabled = disabled;
+    cameraControls[role].enabled.disabled = disabled || !cameraControls[role].select.value;
+  }
+  applyCameraSetupButton.disabled = disabled;
+  refreshCamerasButton.disabled = disabled;
+  cycleCameraViewButton.disabled = disabled || !cameraView.canCycle();
+}
+
+function updateCameraChoiceAvailability() {
+  const selectedByRole = Object.fromEntries(
+    CAMERA_ROLES.map((role) => [role, cameraControls[role].select.value]),
+  );
+  for (const role of CAMERA_ROLES) {
+    const control = cameraControls[role];
+    for (const option of Array.from(control.select.options)) {
+      if (!option.value) continue;
+      option.disabled = CAMERA_ROLES.some(
+        (otherRole) => otherRole !== role && selectedByRole[otherRole] === option.value,
+      );
+    }
+    if (!control.select.value) control.enabled.checked = false;
+    control.enabled.disabled = Boolean(session) || !control.select.value;
+  }
+}
+
+function cameraLabel(device) {
+  return `${device.product} · ${device.serial}`;
+}
+
+function renderCameraConfiguration(state) {
+  cameraDevices = Array.isArray(state.devices) ? state.devices : [];
+  const deviceBySerial = new Map(cameraDevices.map((device) => [device.serial, device]));
+  for (const role of CAMERA_ROLES) {
+    const control = cameraControls[role];
+    const item = state.roles?.[role] || {serial: null, enabled: false};
+    control.select.replaceChildren(new Option("No camera", ""));
+    for (const device of cameraDevices) {
+      control.select.add(new Option(cameraLabel(device), device.serial));
+    }
+    if (item.serial && !deviceBySerial.has(item.serial)) {
+      control.select.add(new Option(`Disconnected · ${item.serial}`, item.serial));
+    }
+    control.select.value = item.serial || "";
+    control.enabled.checked = Boolean(item.enabled && item.serial);
+    const selectedDevice = item.serial ? deviceBySerial.get(item.serial) : null;
+    control.card.hidden = !item.serial;
+    control.caption.textContent = item.serial
+      ? `${CAMERA_ROLE_LABELS[role]} · ${selectedDevice?.product || "camera disconnected"}`
+      : `${CAMERA_ROLE_LABELS[role]} · no camera`;
+  }
+  updateCameraChoiceAvailability();
+  cameraView.configure(state.roles || {}, cameraDevices);
+  setCameraControlsDisabled(Boolean(session));
+  const connected = cameraDevices.length;
+  cameraSetupStatusText.textContent = `${connected} compatible camera${connected === 1 ? "" : "s"} found · assignments saved on this PC`;
+}
+
+async function refreshCameraConfiguration() {
+  cameraSetupStatusText.textContent = "Discovering cameras on this machine…";
+  try {
+    const response = await fetch(`${CAMERA_SERVICE_URL}/configuration`, {cache: "no-store"});
+    if (!response.ok) throw new Error(`camera service returned ${response.status}`);
+    renderCameraConfiguration(await response.json());
+  } catch (error) {
+    cameraSetupStatusText.textContent = `Camera setup unavailable: ${error.message}`;
+    cameraStatusText.textContent = "Waiting for camera service on USB port 8444";
+    cameraStatusText.classList.remove("ok");
+  }
+}
+
+async function applyCameraConfiguration() {
+  if (session) {
+    cameraSetupStatusText.textContent = "Exit passthrough before changing camera setup";
+    return;
+  }
+  const roles = Object.fromEntries(CAMERA_ROLES.map((role) => {
+    const control = cameraControls[role];
+    const serial = control.select.value || null;
+    return [role, {serial, enabled: Boolean(serial && control.enabled.checked)}];
+  }));
+  applyCameraSetupButton.disabled = true;
+  cameraSetupStatusText.textContent = "Applying camera setup…";
+  try {
+    const response = await fetch(`${CAMERA_SERVICE_URL}/configuration`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({roles}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `camera service returned ${response.status}`);
+    renderCameraConfiguration(result);
+    cameraSetupStatusText.textContent = "Camera setup applied and saved";
+  } catch (error) {
+    cameraSetupStatusText.textContent = `Unable to apply camera setup: ${error.message}`;
+    applyCameraSetupButton.disabled = false;
+  }
 }
 
 refreshInputSelection();
@@ -396,6 +538,8 @@ function onXRFrame(frameTime, frame) {
   const leftInputSource = Array.from(session.inputSources).find((source) => source.handedness === "left" && source.gripSpace) || null;
   const rightInputSource = Array.from(session.inputSources).find((source) => source.handedness === "right" && source.gripSpace) || null;
   selectedInputSource = selectedHand === "right" ? rightInputSource : leftInputSource;
+  cameraView.handleControllerButtons({left: leftInputSource, right: rightInputSource});
+  cameraView.render(session, viewerPose);
 
   if (isBimanual()) {
     onBimanualFrame(frameTime, frame, viewerPose, {left: leftInputSource, right: rightInputSource});
@@ -466,6 +610,7 @@ enterButton.addEventListener("click", async () => {
       premultipliedAlpha: true,
     });
     await gl.makeXRCompatible();
+    cameraView.initializeWebGL(gl);
     session.updateRenderState({
       baseLayer: new XRWebGLLayer(session, gl, { alpha: sessionMode === "immersive-ar" }),
     });
@@ -477,11 +622,13 @@ enterButton.addEventListener("click", async () => {
       enterButton.disabled = false;
       exitButton.disabled = true;
       setInputControlsDisabled(false);
+      setCameraControlsDisabled(false);
       setStatus("Relay connected; VR stopped", true);
     });
     enterButton.disabled = true;
     exitButton.disabled = false;
     setInputControlsDisabled(true);
+    setCameraControlsDisabled(true);
     setStatus(
       sessionMode === "immersive-ar"
         ? `Streaming ${selectedHand} · ${mappingModeLabel()} in passthrough`
@@ -495,6 +642,12 @@ enterButton.addEventListener("click", async () => {
 });
 
 exitButton.addEventListener("click", () => session?.end());
+cycleCameraViewButton.addEventListener("click", () => cameraView.cycle());
+applyCameraSetupButton.addEventListener("click", applyCameraConfiguration);
+refreshCamerasButton.addEventListener("click", refreshCameraConfiguration);
+for (const role of CAMERA_ROLES) {
+  cameraControls[role].select.addEventListener("change", updateCameraChoiceAvailability);
+}
 applyInputButton.addEventListener("click", () => {
   if (session) {
     setStatus("Exit VR before changing controller input");
@@ -536,4 +689,5 @@ calibrateButton.addEventListener("click", () => {
   calibrationText.textContent = `Armed for ${selectedHand} wrist: ${chord} in VR`;
   setStatus(`Enter VR, ${chord}, then rotate the ${selectedHand} wrist for 5 seconds`, true);
 });
+refreshCameraConfiguration();
 connectRelay();

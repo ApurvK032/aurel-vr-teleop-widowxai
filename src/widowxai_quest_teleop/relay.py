@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 
 WEB_ROOT = Path(__file__).with_name("web")
@@ -81,6 +81,20 @@ async def index() -> FileResponse:
 @app.get("/client.js")
 async def client_script() -> FileResponse:
     return FileResponse(WEB_ROOT / "client.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/camera_view.js")
+async def camera_view_script() -> FileResponse:
+    return FileResponse(
+        WEB_ROOT / "camera_view.js",
+        media_type="text/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    return Response(status_code=204, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/style.css")

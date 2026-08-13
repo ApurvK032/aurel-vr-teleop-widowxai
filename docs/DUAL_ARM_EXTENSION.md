@@ -3,19 +3,25 @@
 This document defines a safe path to two arms without duplicating two
 single-arm processes and hoping they remain synchronized.
 
-> **Current status: implemented; live output gated.**
+> **Current status: implemented; Behind accepted at 40% and front-facing
+> Mirrored accepted at 45%.**
 >
 > The bimanual transport, dual-arm configuration schema, combined MuJoCo scene,
 > per-arm runtime, coordinated controller, dual telemetry, and all three
-> launchers exist and are exercised by the offline suite. What remains before
-> two physical arms may move is operational, not structural:
+> launchers exist and are exercised by the offline suite. The measured bench
+> has completed a simultaneous physical Behind run with correct response in
+> every direction. Remaining work is validation depth, not architecture:
 >
-> 1. **measure both arm base transforms** — the shipped values are placeholders
->    encoding a 500 mm separation, and every cross-arm result depends on them;
-> 2. **physically accept a calibration for each arm** — both per-hand
->    Behind/Parallel calibrations are still candidates, and
->    `require_live_dual_arm_config` refuses live output until each is accepted;
-> 3. **work through the validation sequence below** on the real bench.
+> 1. both controllers passed the separately authorized read-only preflight;
+> 2. Left/Behind and Right/Behind are physically accepted at 40%, so
+>    `require_live_dual_arm_config` accepts the normal profile without the
+>    unvalidated-calibration override;
+> 3. dual grippers and longer-duration reliability remain to be validated; the
+>    formal Quest-driven Mirrored MuJoCo record remains documentation closure.
+>
+> Base geometry is no longer a blocker. On 2026-08-12 the owner measured the
+> bases exactly 500 mm apart, aligned in X and Z, at equal height, parallel with
+> no relative yaw, and both 50.8 mm (2 in) forward of the table's rear edge.
 >
 > Live output additionally requires the dual token
 > `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`.
@@ -61,9 +67,10 @@ Quest page discovers both controllers, but captures and transmits only the hand
 chosen in the **Hand** menu. The hardware process then locks that hand and its
 Behind/Mirrored mapping for the entire run.
 
-The accepted physical baseline is **Right + Mirrored** at 50% task scale. That
-acceptance applies to one WidowXAI only. Left/Behind, Left/Mirrored, and
-Right/Behind are not automatically accepted for a second arm.
+The general accepted physical baseline is **Right + Mirrored** at 50% task
+scale. Right + Behind is additionally accepted on physical arm `.3` at 40%
+with full gripper control. Neither result automatically accepts the left-hand
+calibration or simultaneous dual-arm motion.
 
 Do not remove the current hand/mapping controls from the validated single-arm
 mode. A dual-arm mode must instead:
@@ -293,11 +300,11 @@ env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
   --config configs/dual_widowxai.yaml
 ```
 
-Add `--tabletop --inline-viewer` for the provisional 500 mm side-by-side
-tabletop scene. The default 1000 × 700 × 40 mm table and 100 mm rear inset are
-simulation assumptions; all four dimensions have command-line overrides and
-are recorded in the run snapshot. Table contacts participate in the combined
-collision verdict.
+Add `--tabletop --inline-viewer` for the measured 500 mm side-by-side base
+layout. The default rear inset is the measured 50.8 mm (2 in); the default
+1000 × 700 × 40 mm table dimensions remain simulation assumptions. All four
+values have command-line overrides and are recorded in the run snapshot. Table
+contacts participate in the combined collision verdict.
 
 No-motion offline checks. Add `--contact-arms` to additionally open a
 read-only driver session to each controller without enabling position mode:

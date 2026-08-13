@@ -27,6 +27,7 @@ placo = ["placo>=0.9.23,<1"]
 
 [project.scripts]
 widowxai-quest-relay = "widowxai_quest_teleop.relay:main"
+widowxai-camera-service = "widowxai_quest_teleop.camera_service:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

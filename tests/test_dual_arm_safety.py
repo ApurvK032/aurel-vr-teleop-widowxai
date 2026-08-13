@@ -26,8 +26,11 @@ from widowxai_quest_teleop.telemetry import (
     TelemetryLogger,
 )
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
+from widowxai_quest_teleop.hardware import HardwareSafetyError
+from widowxai_quest_teleop.model import WidowXAIModel
 from widowxai_quest_teleop.transport import parse_bimanual_pose_message
 from widowxai_quest_teleop.types import Pose
+from widowxai_quest_teleop.one_arm_safety import screen_gripper_path, screen_selected_path
 
 DUAL_CONFIG = "configs/dual_widowxai.yaml"
 MIRRORED_DUAL_CONFIG = "configs/dual_widowxai_mirrored.yaml"
@@ -85,8 +88,16 @@ def test_shipped_dual_profile_loads_and_records_both_arms(dual_config) -> None:
     assert arms["left"].robot_ip == "192.168.1.2"
     assert arms["right"].robot_ip == "192.168.1.3"
     assert dual_config["_dual_arm"]["base_separation_m"] == pytest.approx(0.50)
-    assert arms["left"].placement.measurement_status == "placeholder"
-    assert arms["right"].placement.measurement_status == "placeholder"
+    assert arms["left"].placement.measurement_status == "measured"
+    assert arms["right"].placement.measurement_status == "measured"
+    assert arms["left"].placement.position_m.tolist() == pytest.approx([0.0, 0.25, 0.0])
+    assert arms["right"].placement.position_m.tolist() == pytest.approx([0.0, -0.25, 0.0])
+    assert arms["left"].placement.quaternion_wxyz.tolist() == pytest.approx(
+        [1.0, 0.0, 0.0, 0.0]
+    )
+    assert arms["right"].placement.quaternion_wxyz.tolist() == pytest.approx(
+        [1.0, 0.0, 0.0, 0.0]
+    )
     # Each arm uses a calibration measured for its own controller hand.
     assert "left" in arms["left"].calibration
     assert "right" in arms["right"].calibration
@@ -105,6 +116,8 @@ def test_mujoco_calibrated_dual_profile_is_hardware_disabled() -> None:
     assert arms["left"].controller_hand == "left"
     assert arms["right"].controller_hand == "right"
     assert config["_dual_arm"]["base_separation_m"] == pytest.approx(0.50)
+    assert arms["left"].placement.measurement_status == "measured"
+    assert arms["right"].placement.measurement_status == "measured"
 
 
 def test_same_ip_on_both_arms_is_rejected(dual_config) -> None:
@@ -164,34 +177,31 @@ def test_live_output_requires_cross_arm_collision_checking(dual_config) -> None:
         require_live_dual_arm_config(dual_config, arms)
 
 
-def test_live_output_is_blocked_while_either_calibration_is_pending(dual_config) -> None:
-    """Simulation is allowed on candidates; physical motion is not."""
-
+def test_shipped_dual_profile_has_both_calibrations_accepted(dual_config) -> None:
     arms = parse_dual_arm_config(dual_config)
-    assert not arms["left"].calibration_accepted
-    assert not arms["right"].calibration_accepted
-    with pytest.raises(
-        DualArmConfigError, match="explicitly accepted calibration"
-    ) as exc_info:
-        require_live_dual_arm_config(dual_config, arms)
-    assert "measured base transforms" in str(exc_info.value)
+    assert arms["left"].calibration_accepted
+    assert arms["right"].calibration_accepted
+    assert require_live_dual_arm_config(dual_config, arms) == {}
 
 
 def test_operator_override_unblocks_only_the_calibration_gate(dual_config) -> None:
     """The override must not become a general safety bypass."""
 
     mark_base_transforms_measured(dual_config)
+    dual_config["arms"]["left"]["calibration"] = (
+        "configs/calibrations/left_behind_all_motions_20260723_candidate.json"
+    )
     arms = parse_dual_arm_config(dual_config)
     pending = require_live_dual_arm_config(
         dual_config, arms, allow_unvalidated_calibrations=True
     )
-    assert set(pending) == {"left", "right"}
+    assert set(pending) == {"left"}
 
     # Recorded in the config, so the run's config snapshot carries it.
     override = dual_config["_dual_arm"]["calibration_override"]
     assert override["authorized_by"] == "operator"
     assert override["scope"] == "calibration_acceptance_only"
-    assert set(override["pending"]) == {"left", "right"}
+    assert set(override["pending"]) == {"left"}
 
     # Collision and coordinated-hold gates still refuse, override or not.
     dual_config["safety"]["cross_arm_collision"] = False
@@ -208,6 +218,8 @@ def test_operator_override_unblocks_only_the_calibration_gate(dual_config) -> No
 
 
 def test_calibration_override_does_not_bypass_placeholder_bases(dual_config) -> None:
+    for side in ("left", "right"):
+        dual_config["arms"][side]["base_transform"]["measurement_status"] = "placeholder"
     arms = parse_dual_arm_config(dual_config)
 
     with pytest.raises(DualArmConfigError, match="measured base transform"):
@@ -224,6 +236,9 @@ def test_override_does_not_modify_the_calibration_files(dual_config) -> None:
     from pathlib import Path
 
     mark_base_transforms_measured(dual_config)
+    dual_config["arms"]["left"]["calibration"] = (
+        "configs/calibrations/left_behind_all_motions_20260723_candidate.json"
+    )
     arms = parse_dual_arm_config(dual_config)
     paths = [Path(arms[side].calibration) for side in ("left", "right")]
     before = [path.read_bytes() for path in paths]
@@ -231,10 +246,12 @@ def test_override_does_not_modify_the_calibration_files(dual_config) -> None:
     require_live_dual_arm_config(dual_config, arms, allow_unvalidated_calibrations=True)
 
     assert [path.read_bytes() for path in paths] == before
-    for side in ("left", "right"):
-        assert calibration_acceptance_status(arms[side].calibration).startswith(
-            "candidate"
-        )
+    assert calibration_acceptance_status(arms["left"].calibration).startswith(
+        "candidate"
+    )
+    assert calibration_acceptance_status(arms["right"].calibration) == (
+        "accepted_by_operator_at_40pct"
+    )
 
 
 def test_calibration_acceptance_is_read_not_inferred() -> None:
@@ -334,16 +351,13 @@ def test_mirrored_profile_keeps_every_dual_arm_safety_gate(mirrored_dual_config)
     assert mirrored_dual_config["hardware"]["max_demo_duration_s"] == pytest.approx(60.0)
 
 
-def test_mirrored_live_output_is_blocked_by_the_pending_left_hand_transform(
+def test_mirrored_profile_has_both_calibrations_accepted(
     mirrored_dual_config,
 ) -> None:
-    """One accepted transform is not two. The gate must still refuse."""
-
     arms = parse_dual_arm_config(mirrored_dual_config)
     assert arms["left"].calibration_accepted
-    assert not arms["right"].calibration_accepted
-    with pytest.raises(DualArmConfigError, match="explicitly accepted calibration"):
-        require_live_dual_arm_config(mirrored_dual_config, arms)
+    assert arms["right"].calibration_accepted
+    assert require_live_dual_arm_config(mirrored_dual_config, arms) == {}
 
 
 def test_calibration_captured_for_the_other_hand_is_rejected(mirrored_dual_config) -> None:
@@ -370,12 +384,12 @@ def test_mirror_mode_is_a_proper_rotation_of_the_behind_mapping() -> None:
     for hand, behind, mirror in (
         (
             "left",
-            "configs/calibrations/left_behind_all_motions_20260723_candidate.json",
-            "configs/calibrations/left_mirror_all_motions_20260723_candidate.json",
+            "configs/calibrations/left_behind_all_motions_20260812_accepted.json",
+            "configs/calibrations/left_mirror_all_motions_20260812_accepted.json",
         ),
         (
             "right",
-            "configs/calibrations/right_behind_all_motions_20260723_candidate.json",
+            "configs/calibrations/right_behind_all_motions_20260812_accepted.json",
             "configs/calibrations/right_mirror_20260723_accepted.json",
         ),
     ):
@@ -540,14 +554,14 @@ def test_simultaneous_path_screening_covers_both_arms(collision_model) -> None:
     assert report.kind.startswith("cross-arm")
 
 
-def test_provisional_500mm_tabletop_keeps_rest_and_home_clear(dual_config) -> None:
+def test_measured_500mm_layout_keeps_rest_and_home_clear(dual_config) -> None:
     dual_config["simulation_environment"] = {
         "status": "provisional",
         "tabletop": {
             "width_m": 1.0,
             "depth_m": 0.7,
             "thickness_m": 0.04,
-            "rear_edge_x_m": -0.10,
+            "rear_edge_x_m": -0.0508,
             "top_z_m": 0.0,
         },
     }
@@ -566,13 +580,104 @@ def test_provisional_500mm_tabletop_keeps_rest_and_home_clear(dual_config) -> No
     assert arms["right"].arm_config.placement.position_m[1] == pytest.approx(-0.25)
 
 
+def test_one_arm_commissioning_paths_clear_with_other_at_measured_rest(dual_config) -> None:
+    arms = parse_dual_arm_config(dual_config)
+    single = WidowXAIModel(dual_config["model"]["xml_path"])
+    dual = DualArmCollisionModel(
+        {side: arms[side].placement for side in ("left", "right")},
+        xml_path=dual_config["model"]["xml_path"],
+        clearance_m=dual_config["safety"]["cross_arm_clearance_m"],
+    )
+
+    minimum = screen_selected_path(
+        single,
+        dual,
+        moving_side="left",
+        moving_start=REST_Q,
+        moving_end=HOME_Q,
+        holding_q=REST_Q,
+        moving_gripper_m=0.0,
+        holding_gripper_m=0.0,
+        samples=501,
+        clearance_m=0.03,
+    )
+
+    assert minimum >= 0.03
+
+
+def test_one_arm_commissioning_allows_only_a_clearing_marginal_start(dual_config) -> None:
+    arms = parse_dual_arm_config(dual_config)
+    single = WidowXAIModel(dual_config["model"]["xml_path"])
+    dual = DualArmCollisionModel(
+        {side: arms[side].placement for side in ("left", "right")},
+        xml_path=dual_config["model"]["xml_path"],
+        clearance_m=0.03,
+    )
+    drooped_right = np.array(
+        [-0.001335, -0.004005, -0.005150, -0.001717, 0.000572, -0.000191]
+    )
+
+    minimum = screen_selected_path(
+        single,
+        dual,
+        moving_side="right",
+        moving_start=drooped_right,
+        moving_end=HOME_Q,
+        holding_q=REST_Q,
+        moving_gripper_m=0.0,
+        holding_gripper_m=0.0,
+        samples=501,
+        clearance_m=0.03,
+        allow_marginal_start_m=0.002,
+    )
+    assert minimum >= 0.03
+
+    with pytest.raises(HardwareSafetyError, match="never clears"):
+        screen_selected_path(
+            single,
+            dual,
+            moving_side="right",
+            moving_start=drooped_right,
+            moving_end=drooped_right,
+            holding_q=REST_Q,
+            moving_gripper_m=0.0,
+            holding_gripper_m=0.0,
+            samples=11,
+            clearance_m=0.03,
+            allow_marginal_start_m=0.002,
+        )
+
+
+def test_stationary_arm_guard_screens_full_gripper_stroke(dual_config) -> None:
+    arms = parse_dual_arm_config(dual_config)
+    dual = DualArmCollisionModel(
+        {side: arms[side].placement for side in ("left", "right")},
+        xml_path=dual_config["model"]["xml_path"],
+        clearance_m=0.03,
+    )
+
+    minimum = screen_gripper_path(
+        dual,
+        moving_side="right",
+        moving_q=HOME_Q,
+        holding_q=REST_Q,
+        moving_start_gripper_m=0.0,
+        moving_end_gripper_m=0.04,
+        holding_gripper_m=0.0,
+        clearance_m=0.03,
+        samples=501,
+    )
+
+    assert minimum >= 0.03
+
+
 def test_tabletop_contact_is_an_environment_collision(dual_config) -> None:
     dual_config["simulation_environment"] = {
         "tabletop": {
             "width_m": 1.0,
             "depth_m": 0.7,
             "thickness_m": 0.04,
-            "rear_edge_x_m": -0.10,
+            "rear_edge_x_m": -0.0508,
             "top_z_m": 0.0,
         }
     }

@@ -59,6 +59,74 @@
       <button id="apply-input" class="secondary" type="button">Apply input</button>
       <p id="input-selection" class="selection-summary"></p>
     </section>
+    <section class="camera-settings" aria-labelledby="camera-settings-title">
+      <div class="camera-heading">
+        <div>
+          <p class="section-title" id="camera-settings-title">Operator camera views</p>
+          <p class="field-help">Assign each physical camera once, choose which views appear, then apply before entering passthrough.</p>
+        </div>
+        <button id="cycle-camera-view" class="secondary compact" type="button">Cycle view (B)</button>
+      </div>
+      <div class="camera-role-settings">
+        <div class="camera-role-row" data-camera-role="scene">
+          <label>
+            Scene
+            <select id="scene-camera-select" class="camera-device-select">
+              <option value="">No camera</option>
+            </select>
+          </label>
+          <label class="camera-enabled-toggle">
+            <input id="scene-camera-enabled" type="checkbox">
+            Show in passthrough
+          </label>
+        </div>
+        <div class="camera-role-row" data-camera-role="left_wrist">
+          <label>
+            Left wrist
+            <select id="left-wrist-camera-select" class="camera-device-select">
+              <option value="">No camera</option>
+            </select>
+          </label>
+          <label class="camera-enabled-toggle">
+            <input id="left-wrist-camera-enabled" type="checkbox">
+            Show in passthrough
+          </label>
+        </div>
+        <div class="camera-role-row" data-camera-role="right_wrist">
+          <label>
+            Right wrist
+            <select id="right-wrist-camera-select" class="camera-device-select">
+              <option value="">No camera</option>
+            </select>
+          </label>
+          <label class="camera-enabled-toggle">
+            <input id="right-wrist-camera-enabled" type="checkbox">
+            Show in passthrough
+          </label>
+        </div>
+      </div>
+      <div class="camera-setup-actions">
+        <button id="apply-camera-setup" class="secondary compact" type="button">Apply camera setup</button>
+        <button id="refresh-cameras" class="secondary compact" type="button">Refresh cameras</button>
+      </div>
+      <p id="camera-setup-status" class="field-help">Discovering cameras on this machine…</p>
+      <div class="camera-previews">
+        <figure id="scene-preview-card">
+          <canvas id="scene-preview" width="320" height="240"></canvas>
+          <figcaption id="scene-preview-caption">Scene · no camera</figcaption>
+        </figure>
+        <figure id="left-wrist-preview-card" hidden>
+          <canvas id="left-wrist-preview" width="320" height="240"></canvas>
+          <figcaption id="left-wrist-preview-caption">Left wrist · no camera</figcaption>
+        </figure>
+        <figure id="right-wrist-preview-card">
+          <canvas id="right-wrist-preview" width="320" height="240"></canvas>
+          <figcaption id="right-wrist-preview-caption">Right wrist · no camera</figcaption>
+        </figure>
+      </div>
+      <p id="camera-status" class="camera-status">Waiting for camera service on USB port 8444</p>
+      <p id="camera-view-mode" class="selection-summary">No camera views selected</p>
+    </section>
     <div class="status"><span id="dot"></span><span id="status">Connecting to relay…</span></div>
     <div class="actions">
       <button id="enter" disabled>Checking XR support…</button>
@@ -75,6 +143,7 @@
     <p class="warning">This interface does not enable physical-arm output. The four saved motion profiles use reduced gain and fixed reach limits. Their full-stroke trigger/gripper behavior remains pending acceptance on the arm.</p>
   </main>
   <canvas id="xr-canvas"></canvas>
+  <script src="/camera_view.js"></script>
   <script src="/client.js"></script>
 </body>
 </html>

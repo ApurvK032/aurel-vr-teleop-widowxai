@@ -20,8 +20,10 @@ Current single-arm profile:
 - enables the full 0–40 mm gripper stroke;
 - returns the arm to all-zero rest on exit.
 
-Right + Mirrored is operator-accepted at this scale. The other three mappings
-remain candidates and must be checked in MuJoCo before physical use.
+Right + Mirrored is operator-accepted at this 50% scale. Right + Behind and
+Left + Behind are accepted separately at 40% and must not be inferred as
+accepted at 50%; Left + Mirrored is accepted separately at 45% and must not be
+inferred as accepted at 50%.
 
 ### `step3_velocity_feedforward_25ms_hardware.yaml`
 
@@ -41,9 +43,9 @@ calibration documents:
 
 | Quest page | Profile | Status at 50% |
 |---|---|---|
-| Left + Behind/Parallel | `left_behind` | Pending |
-| Left + Mirrored | `left_mirror` | Pending |
-| Right + Behind/Parallel | `right_behind` | Pending |
+| Left + Behind/Parallel | `left_behind` | Accepted at 40%; 50% pending |
+| Left + Mirrored | `left_mirror` | Accepted at 45%; 50% pending |
+| Right + Behind/Parallel | `right_behind` | Accepted at 40%; 50% pending |
 | Right + Mirrored | `right_mirror` | Accepted |
 
 Mirrored semantics flip left/right and forward/back translation, screw, and
@@ -71,6 +73,18 @@ without first testing it in MuJoCo.
 - `right_mirror_axis_validation_*`, `right_real_axis_validation_hardware.yaml`,
   and `temporary_*` preserve calibration experiments and are not normal run
   profiles.
+- `right_dual_bench_axis_validation_hardware.yaml` applies the exact right-hand
+  Behind candidate from the dual profile to physical arm `.3` at the earlier
+  reduced 0.20 scale. Run it only with the stationary-arm guard flags on
+  `run_hardware.py`: `--dual-guard-config configs/dual_widowxai.yaml
+  --moving-side right`. Arm `.2` remains read-only and its fresh measured
+  geometry screens every command and shutdown path.
+- `right_dual_bench_40pct_full_gripper_hardware.yaml` is the requested second
+  stage: 0.40 translation/rotation scale, 0.070 m / 0.16 rad reach, full
+  trigger-controlled 0–0.040 m gripper stroke, and a 45 s cap. It requires the
+  same `.2` read-only stationary-arm guard. The operator accepted its directions,
+  orientation response, gripper, and shutdown on 2026-08-12; it does not replace
+  the clean 0.20 evidence profile or validate higher gains.
 
 Change one control variable per experiment. Never weaken physical joint,
 collision, stale-stream, feedback, driver-version, or shutdown gates merely to
@@ -84,11 +98,12 @@ blocks with per-arm `arms.left` / `arms.right` entries plus a `safety` block,
 and it is validated by `config.parse_dual_arm_config` rather than by the
 single-arm loader.
 
-Its base transforms are placeholders encoding a 500 mm separation. Measure both
-arm bases against one shared world frame before any physical dual-arm work,
-then replace each transform and change its explicit `measurement_status` from
-`placeholder` to `measured`. Live mode rejects any other status, including when
-the calibration-only override is supplied.
+Its base transforms record the bench geometry measured on 2026-08-12: the arm
+bases are exactly 500 mm apart with no forward or vertical offset, equal height,
+parallel axes, no relative yaw, and both base centers 50.8 mm (2 in) forward of
+the table's rear edge. Their explicit `measurement_status` is `measured`. Live
+mode still rejects any other status, including when the calibration-only
+override is supplied.
 
 Live two-arm output additionally requires an explicitly accepted calibration
 for each arm and the dual `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token. Do
