@@ -271,7 +271,7 @@ def test_both_hands_mirror_profiles_follow_operator_defined_four_axis_flips() ->
         mirror_path = (
             "configs/calibrations/right_mirror_20260723_accepted.json"
             if hand == "right"
-            else "configs/calibrations/left_mirror_all_motions_20260723_candidate.json"
+            else "configs/calibrations/left_mirror_all_motions_20260812_accepted.json"
         )
         behind_document = json.loads(
             resolve_project_path(behind_path).read_text(encoding="utf-8")

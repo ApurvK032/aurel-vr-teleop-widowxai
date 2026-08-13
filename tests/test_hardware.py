@@ -139,6 +139,54 @@ def test_right_real_axis_validation_profile_is_conservative_and_pending() -> Non
         assert np.linalg.det(matrix) == pytest.approx(1.0, abs=1e-9)
 
 
+def test_right_dual_bench_axis_profile_preserves_historical_candidate() -> None:
+    config = load_config("configs/right_dual_bench_axis_validation_hardware.yaml")
+    dual = load_config("configs/dual_widowxai.yaml")
+
+    validate_hardware_config(config)
+    validate_live_hardware_timing(config)
+    assert config["quest"]["hand"] == "right"
+    assert config["quest"]["mapping_mode"] == "real"
+    assert config["quest"]["calibration"].endswith("20260723_candidate.json")
+    assert dual["arms"]["right"]["calibration"].endswith("20260812_accepted.json")
+    assert config["hardware"]["robot_ip"] == dual["arms"]["right"]["robot_ip"]
+    assert config["hardware"]["control_gripper"] is False
+    assert config["quest"]["translation_scale"] == pytest.approx(0.20)
+    assert config["quest"]["rotation_scale"] == pytest.approx(0.20)
+    assert config["quest"]["position_reach_limit_m"] == pytest.approx(0.035)
+    assert config["quest"]["rotation_reach_limit_rad"] == pytest.approx(0.08)
+    assert config["hardware"]["max_demo_duration_s"] == pytest.approx(15.0)
+
+
+def test_right_dual_bench_40pct_profile_enables_full_gripper_for_45_seconds() -> None:
+    config = load_config("configs/right_dual_bench_40pct_full_gripper_hardware.yaml")
+    previous = load_config("configs/right_dual_bench_axis_validation_hardware.yaml")
+    dual = load_config("configs/dual_widowxai.yaml")
+
+    validate_hardware_config(config)
+    validate_live_hardware_timing(config)
+    assert config["quest"]["calibration"] == dual["arms"]["right"]["calibration"]
+    assert config["hardware"]["robot_ip"] == dual["arms"]["right"]["robot_ip"]
+    assert config["quest"]["translation_scale"] == pytest.approx(0.40)
+    assert config["quest"]["rotation_scale"] == pytest.approx(0.40)
+    assert config["quest"]["position_reach_limit_m"] == pytest.approx(0.070)
+    assert config["quest"]["rotation_reach_limit_rad"] == pytest.approx(0.16)
+    assert config["hardware"]["control_gripper"] is True
+    assert config["hardware"]["gripper_open_m"] == pytest.approx(0.040)
+    assert config["hardware"]["gripper_min_demo_m"] == pytest.approx(0.0)
+    assert config["hardware"]["max_demo_duration_s"] == pytest.approx(45.0)
+    calibration = json.loads(
+        Path(config["quest"]["calibration"]).read_text(encoding="utf-8")
+    )
+    validation = calibration["physical_validation"]
+    assert validation["status"] == "accepted_by_operator_at_40pct"
+    assert validation["scope"]["translation_scale"] == pytest.approx(0.40)
+    assert validation["scope"]["rotation_scale"] == pytest.approx(0.40)
+    assert validation["telemetry"]["ik_failures"] == 0
+    assert config["control"] == previous["control"]
+    assert config["ik"] == previous["ik"]
+
+
 def test_right_mirror_axis_validation_profiles_are_isolated_and_pending() -> None:
     baseline = load_config("configs/step3_velocity_feedforward_25ms_hardware.yaml")
     hardware = load_config("configs/right_mirror_axis_validation_hardware.yaml")
@@ -216,11 +264,12 @@ def test_quest_50pct_profile_requires_and_applies_fixed_profiles() -> None:
         calibration = json.loads(
             Path(config["quest"]["calibration"]).read_text(encoding="utf-8")
         )
-        expected_status = (
-            "accepted_by_operator_at_50pct"
-            if profile_name == "right_mirror"
-            else "candidate_pending_physical_validation"
-        )
+        expected_status = {
+            "left_behind": "accepted_by_operator_at_40pct",
+            "left_mirror": "accepted_by_operator_at_45pct",
+            "right_mirror": "accepted_by_operator_at_50pct",
+            "right_behind": "accepted_by_operator_at_40pct",
+        }.get(profile_name, "candidate_pending_physical_validation")
         assert calibration["task_mapping_semantics"]["status"] == expected_status
 
 

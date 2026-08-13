@@ -147,7 +147,7 @@ def main() -> None:
     parser.add_argument(
         "--tabletop",
         action="store_true",
-        help="add a collidable provisional tabletop to the dual-arm scene",
+        help="add the partially measured collidable tabletop to the dual-arm scene",
     )
     parser.add_argument("--table-width-m", type=float, default=1.0)
     parser.add_argument("--table-depth-m", type=float, default=0.7)
@@ -155,15 +155,29 @@ def main() -> None:
     parser.add_argument(
         "--base-rear-inset-m",
         type=float,
-        default=0.10,
-        help="distance from the table's rear edge to the arm-base centerline",
+        default=0.0508,
+        help=(
+            "distance from the table's rear edge to the arm-base centerline "
+            "(measured default: 0.0508 m / 2 in)"
+        ),
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.tabletop:
+        using_measured_rear_inset = bool(
+            np.isclose(args.base_rear_inset_m, 0.0508, rtol=0.0, atol=1e-9)
+        )
         config["simulation_environment"] = {
             "status": "provisional",
+            "measurement_status": {
+                "table_dimensions": "provisional",
+                "base_rear_inset": (
+                    "measured_2026-08-12"
+                    if using_measured_rear_inset
+                    else "operator_override"
+                ),
+            },
             "tabletop": {
                 "width_m": args.table_width_m,
                 "depth_m": args.table_depth_m,
@@ -185,12 +199,17 @@ def main() -> None:
                 "Simulation is permitted; live output is not."
             )
     if args.tabletop:
+        rear_inset_note = (
+            "Rear inset is measured"
+            if using_measured_rear_inset
+            else "Rear inset is an operator override"
+        )
         print(
-            "PROVISIONAL TABLETOP: "
+            "TABLETOP: "
             f"{args.table_width_m:.3f} m wide x {args.table_depth_m:.3f} m deep x "
             f"{args.table_thickness_m:.3f} m thick; base centerline "
             f"{args.base_rear_inset_m:.3f} m from rear edge. "
-            "Simulation only until these dimensions are measured."
+            f"{rear_inset_note}; width/depth/thickness remain provisional."
         )
         # Reuse the same combined path screen as hardware preflight, but with
         # the simulation-only tabletop injected above. This opens no backend.

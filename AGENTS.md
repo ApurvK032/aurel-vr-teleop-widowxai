@@ -48,10 +48,17 @@ commit `95e04a1` adds operator-heading lock. Its best complete evidence is
 `runs/2026-07-22/20260722-165441_milestone3-step3-60s-acceptance`: 5,400
 rows and zero IK failures.
 
-Left/Behind, Left/Mirror, and Right/Behind remain pending at the current 50%
-scale. The older reduced-gain Right/Behind acceptance and rejected calibration
-attempts remain historical evidence; they do not override the current
-Right/Mirror acceptance.
+Right/Behind is physically accepted on arm `.3` at 40% scale with full gripper
+control, recorded in
+`configs/calibrations/right_behind_all_motions_20260812_accepted.json`.
+Left/Behind is physically accepted on arm `.2` at 40% scale for all six signed
+motions, recorded in
+`configs/calibrations/left_behind_all_motions_20260812_accepted.json`; its
+gripper was not commanded. Left/Mirror is physically accepted at 45% for the
+front-facing dual profile, recorded in
+`configs/calibrations/left_mirror_all_motions_20260812_accepted.json`; its
+gripper was also not commanded. Both Behind mappings remain untested at 50%;
+none of these facts overrides the independent Right/Mirror 50% acceptance.
 
 ## Non-negotiable physical-arm rules
 
@@ -89,7 +96,8 @@ Right/Mirror acceptance.
 |---|---|
 | Arm | Trossen WidowXAI follower |
 | Arm IP | `192.168.1.2` |
-| PC LAN address observed | `192.168.1.3` |
+| PC robot-LAN address | `192.168.1.10/24` on `benfei-lab-lan` (no gateway) |
+| Left/right arm IPs | `192.168.1.2` / `192.168.1.3` |
 | Driver TCP/UDP | TCP `50001`, UDP `50000` |
 | Trossen driver | `trossen-arm==1.8.6` |
 | Driver-reported version | `1.8.6` |
@@ -731,6 +739,7 @@ archive/reference_implementations ignored XRoboToolkit ZIPs
 configs/README.md                 stable/rollback/experimental catalog
 configs/calibrations/             left baseline and temporary right fits
 docs/                             dual-arm and CAD commissioning notes
+docs/PROJECT_PROGRESS.md          concise status/performance/blocker ledger
 results/major_runs.csv            compact publishable milestone metrics
 runs/manifest.csv                 ignored local full run index
 runs/YYYY-MM-DD/                  ignored telemetry payloads
@@ -1029,34 +1038,421 @@ changing another variable.
   rejection in MuJoCo. It does not validate encoder feedback timing, the joint-2
   physical tracking fault fix, real base geometry, or any live driver behavior.
 
+### 2026-08-12 — Milestone 8: isolated dual-D405 operator views
+
+- Two D405s and the Quest were initially confirmed on this workstation at USB
+  SuperSpeed (5 Gb/s negotiated). Quest ADB sustained approximately 47 MB/s in
+  a 128 MiB one-way transfer, comfortably above the first camera milestone's
+  measured compressed rate.
+- `camera_service.py` discovers the D405 V4L2 YUYV color nodes, assigns stable
+  `scene` and `wrist` roles (or explicit ASIC serials), runs one FFmpeg capture
+  process per camera at 640 × 480 × 30 FPS, and keeps only the latest complete
+  JPEG for each role. It exposes health/snapshot endpoints and independent
+  binary WebSockets on port 8444; it never imports or contacts an arm backend.
+- `restart_localhost.sh --with-cameras` now owns both services and creates ADB
+  reverse mappings for 8443 and 8444. The default command remains camera-free.
+  Shutdown waits for the relay and camera process so their FFmpeg children do
+  not retain V4L2 devices.
+- The Quest page shows two live previews and renders stereo-correct panels at
+  finite depth inside immersive passthrough. The first Quest acceptance run
+  confirmed both feeds and all three B-button states. Follow-up operator input
+  replaced the initial head-following transform with a session-fixed
+  `local-floor` anchor, enlarged and lowered the overview panels to sit just
+  above center, and added a 380 ms eased position/size transition between
+  overview, scene focus, and wrist focus. A view change is rejected with haptic
+  feedback while either tracked grip is held. The non-primary feed remains
+  visible as a small preview.
+- Before the direct-port camera disconnected physically from USB, simultaneous
+  five-second transport validation delivered 151 scene frames at 30.06 FPS and
+  152 wrist frames at 30.21 FPS. Mean JPEG sizes were 30.0 KiB and 23.1 KiB.
+  The camera health endpoint remained fresh and the separate pose relay stayed
+  responsive. Normal-browser verification showed both real feeds, all three
+  view-cycle states, and no application JavaScript error; a favicon-only 404
+  was removed afterward.
+- The kernel recorded an actual `usb 4-2: USB disconnect` for D405 RealSense
+  serial `218622273557` / ASIC serial `235123071818` during an earlier restart.
+  After reconnection, both D405s negotiated 5 Gb/s again, both WebSockets opened
+  in Quest Browser, and the owner reported the two-feed passthrough workflow as
+  working well. The revised world anchor/layout animation still requires the
+  immediate headset feel-check before it is treated as accepted polish.
+- Verification after the browser fixes: focused camera/relay/transport suite
+  `34 passed`; full `.venv` suite `226 passed`; full no-arm `.venv-arm18`
+  suite `226 passed`; JavaScript, Python, shell syntax, and `git diff --check`
+  passed. No robot backend was opened.
+- This milestone is an operator-display prototype. RGB video freshness is not
+  yet connected to a physical-motion hold, and no physical arm was contacted.
+
+### 2026-08-12 — Milestone 9: configurable three-camera operator layout
+
+- The fixed `scene`/`wrist` camera pair is generalized to three logical roles:
+  `scene`, `left_wrist`, and `right_wrist`. The camera service discovers
+  physical V4L2 640 × 480 × 30 FPS YUYV color devices (including RealSense
+  D405/D455), exposes their stable serials through `/configuration`, and starts
+  FFmpeg only for roles that are both assigned and enabled.
+- The Quest page now has one device dropdown and **Show in passthrough**
+  checkbox per role. The same physical serial cannot be assigned twice.
+  Selecting no camera forces that role off; unchecking a selected role stops
+  its capture while retaining the assignment. **Apply camera setup** is
+  unavailable during WebXR, so a feed cannot be silently remapped during live
+  clutch operation.
+- Successful assignments are persisted outside the repository at
+  `${XDG_CONFIG_HOME:-~/.config}/widowxai-quest-teleop/cameras.json`. The first
+  run preserves the original two-camera behavior by assigning stable camera 1
+  to Scene and camera 2 to Right wrist. Browser/API changes thereafter require
+  no code edit and no camera-service restart.
+- Passthrough adapts to zero, one, two, or three enabled roles. Zero produces
+  no panel/B action; one produces one larger overview panel; two and three add
+  every enabled role to the B-button cycle. Focus mode keeps one or two small
+  previews, and the existing session-fixed world anchor plus 380 ms eased
+  transitions remain in use. After the operator found the three-view layout
+  obstructed the direct passthrough workspace, one shared vertical offset was
+  set to `+0.18 m` for overview, focused panels, and previews; preserve the
+  single offset rather than independently drifting layouts during later tuning.
+- The camera layer remains isolated from `/ws` pose traffic and from all robot
+  backends. RGB loss still displays status only; it is not a physical-motion
+  hold gate.
+- Focused verification covers normalized three-role configuration, duplicate
+  rejection, persisted restore, enabled-only process startup, first-run
+  migration, dynamic UI controls, and existing transport primitives. Both full
+  offline suites pass at 229 tests; JavaScript, Python, shell, and diff checks
+  pass. Live browser validation discovered the two D405s plus the built-in UVC
+  webcam, prevented duplicate dropdown choices, enabled/disabled the checkbox
+  with selection, persisted an unchanged Apply, and cycled Overview → Scene →
+  Right wrist → Overview with no console warning/error. The final workstation
+  uses one D455 plus two D405s for Scene/Left wrist/Right wrist; the owner
+  accepted all three feeds, focus cycling, world anchoring, smooth transitions,
+  and the later +0.18 m common height adjustment. Final health was 29.970,
+  30.019, and 30.004 FPS respectively. The approximate current compressed
+  payload is 2.3 MB/s before WebSocket overhead. Glass-to-glass latency and
+  controlled three-stream impact on active WebXR pose rate remain unmeasured.
+
+### 2026-08-12 — Dual-arm LAN visibility confirmed
+
+- The old single-arm workstation profile placed the PC at `192.168.1.3/24`,
+  which collided with the configured right-arm address. Pinging `.3` therefore
+  looped back to the PC and did not test the right controller.
+- The `benfei-lab-lan` NetworkManager profile now uses the unused static address
+  `192.168.1.10/24`, has no gateway, and is marked never-default so Wi-Fi keeps
+  the workstation's default route.
+- After the change, both controllers responded independently with zero packet
+  loss: left `192.168.1.2` / MAC `04:e9:e5:19:15:13`, right `192.168.1.3` / MAC
+  `04:e9:e5:1b:23:ce`. The USB Ethernet link negotiated 1 Gb/s full duplex.
+  Only ICMP and ARP visibility were checked; no driver session or motion command
+  was opened.
+- The shared USB-C dock briefly reset and removed its Ethernet adapter and both
+  D405s together; kernel logs showed the entire hub disconnect/re-enumerate.
+  NetworkManager automatically restored `.10`, and both arms were reachable
+  again afterward. Treat another simultaneous LAN/camera disappearance as a
+  dock/cable/power event rather than three independent device failures.
+
+### 2026-08-12 — Milestone 10: physical dual-base geometry recorded
+
+- The owner measured the two bases exactly 500 mm center-to-center, with no
+  forward/back or vertical offset, equal height, parallel forward axes, and no
+  relative yaw. Both base centers are exactly 2 in (50.8 mm) forward of the
+  table's rear edge.
+- The canonical shared frame remains +X forward, +Y toward the left arm, and +Z
+  upward, with its origin midway between the bases. The resulting transforms
+  are left `[0.0, +0.25, 0.0]` and right `[0.0, -0.25, 0.0]`, both with identity
+  quaternion `[1.0, 0.0, 0.0, 0.0]`.
+- All three dual profiles now mark those transforms `measured`. The MuJoCo-only
+  profile remains hardware-disabled and its task-frame calibrations remain
+  `simulation_only`; a measured base does not convert calibration evidence.
+- The tabletop launcher's default rear inset changed from the provisional
+  0.100 m to the measured 0.0508 m. Table width, depth, and thickness remain
+  provisional assumptions and are labelled separately in the run snapshot.
+- This removes the geometry live gate, but it does not authorize motion. The
+  candidate per-hand physical calibrations still block an ordinary live dual
+  launch. The official-driver read-only preflight required separate operator
+  approval; its completed result is recorded below.
+- The no-contact preflight passed every 501-sample simultaneous and one-arm-
+  moving rest/home path. Modeled home/home clearance is 0.060 m against the
+  configured 0.030 m margin. It reported both bases `measured`, left and right
+  calibrations `candidate_pending_physical_validation`, and live output blocked
+  only on calibration acceptance. No controller was contacted and no command
+  was sent.
+- Verification after the geometry update: focused dual suite `48 passed` in
+  each environment; full `.venv` suite `229 passed`; full no-arm `.venv-arm18`
+  suite `229 passed`; Python, JavaScript, shell syntax, and `git diff --check`
+  passed.
+- With explicit owner authorization, the official-driver read-only preflight
+  then passed for both controllers. Both reported driver `1.8.6` and firmware
+  `1.8.3`. Left `.2` reported arm joints
+  `[-0.000572, -0.000572, 0.006294, 0.000191, -0.001335, -0.000954]` rad and
+  gripper `-0.000022` m; right `.3` reported
+  `[-0.001335, -0.004005, -0.005150, -0.001717, 0.000572, -0.000191]` rad and
+  gripper `0.000022` m. Both are effectively at rest. Position mode was never
+  enabled, no command was sent, and both sessions closed normally.
+
+### 2026-08-12 — Milestone 11: isolated left-arm home cycle passed
+
+- After explicit owner motion authorization and confirmation that the workspace
+  was clear, both arms were firmly mounted, controller power cutoff was within
+  reach, and both Quest grips were released, only the left arm at
+  `192.168.1.2` was commissioned through rest → home → rest.
+- `scripts/commission_one_arm.py` is a deliberately narrower physical launcher:
+  it connects the other controller read-only, screens 501 samples of the
+  selected arm's self-collision path and its cross-arm distance against the
+  other arm's fresh measured pose, enables position mode only on the selected
+  arm, leaves both grippers untouched, checks feedback during the existing
+  vetted ramp, and returns to rest on success or fault.
+- The stationary right arm's measured rest pose has joint 2 at `-0.005150 rad`,
+  which the pinned model labels as a pre-existing `right_link_2` / `right_link_4`
+  self-contact at path sample zero. The commissioning screen does not reinterpret
+  that stationary model artifact as motion: it still applies the full right-arm
+  geometry to cross-arm distance, while independently enforcing every moving-
+  left-arm self-collision sample. No collision constraint on commanded geometry
+  is bypassed.
+- Fresh start readings matched the read-only preflight. Both outbound and return
+  paths retained 0.060 m modeled cross-arm separation against the configured
+  0.030 m margin. The left arm reached home with 0.009119 rad maximum joint
+  error, then returned to rest with 0.008202 rad maximum error, both well below
+  the unchanged 0.080 rad feedback stop. The right arm remained read-only;
+  neither gripper entered position mode or received a command.
+- The right arm has not yet been authorized for its own cycle. Do not infer
+  right-arm motion approval or begin dual motion from this left-only result.
+- Verification after adding the isolated commissioning path: focused dual
+  safety suite `49 passed` in each environment; full `.venv` suite `230 passed`;
+  full `.venv-arm18` suite `230 passed`; Python, JavaScript, shell syntax, and
+  `git diff --check` passed.
+
+### 2026-08-12 — Milestone 12: isolated right-arm home cycle passed
+
+- The first attempt was interrupted before position mode or motion. Its offline
+  screen identified the known near-zero right joint-2 model artifact: a
+  0.359 mm `link_2` / `link_4` overlap at the measured rest pose which clears
+  at the first 501-sample step (0.2%) toward home.
+- The one-arm commissioning screen now permits a marginal measured start only
+  up to 2 mm and only when the path never deepens the initial penetration,
+  fully clears it, never re-enters contact, and retains the cross-arm margin.
+  It still fails closed for any contact from a clear start, a deepening contact,
+  an over-limit start, a path that never clears, or a later re-entry. Focused
+  tests cover both the accepted clearing case and the never-clears rejection.
+- With separate owner authorization, only the right arm at `192.168.1.3`
+  entered position mode. The left arm was freshly read and remained read-only;
+  neither gripper entered position mode or received a command.
+- The right rest → home → rest paths retained 0.060 m modeled separation against
+  the configured 0.030 m margin. Maximum home error was 0.008738 rad and final
+  rest error was 0.012016 rad, both below the unchanged 0.080 rad stop limit.
+  Both controllers closed normally.
+- Verification after the marginal-start rule and right-arm cycle: focused dual
+  safety suite `50 passed` in each environment; full `.venv` suite `231 passed`;
+  full `.venv-arm18` suite `231 passed`; Python, JavaScript, shell syntax, and
+  `git diff --check` passed.
+
+### 2026-08-12 — Milestone 13: guarded Right/Behind mapping run on arm `.3`
+
+- `right_dual_bench_axis_validation_hardware.yaml` targets physical right arm
+  `.3` with the exact `right_behind_all_motions_20260723_candidate.json` used by
+  the dual profile. Translation and rotation scales are both 0.20, reach limits
+  are 0.035 m / 0.08 rad, the run cap is 15 s, and gripper control is disabled.
+- The single-arm launcher now optionally loads the measured dual profile as a
+  stationary-arm guard. It connects `.2` read-only, screens the actual startup
+  and shutdown paths, refreshes the stationary state at feedback cadence, and
+  checks every outgoing `.3` command against the configured 0.030 m cross-arm
+  margin. The guard identity and IPs are saved in the telemetry config snapshot.
+- After two stale D405 processes were found, the relay/camera stack was
+  restarted. D455 and both D405s returned healthy at approximately 30 FPS, ADB
+  reverse was active on ports 8443/8444, and the physical run then completed.
+- Evidence is
+  `runs/2026-08-12/20260812-172002_right-dual-bench-axis-validation-01`:
+  1,350 rows over 14.985 s at 90.026 Hz, all Quest sequences unique and
+  consecutive, 1,348 fresh rows, 1,059 active rows across two grip episodes,
+  zero IK failures, and zero limiter flags.
+- Position residual was 0.323 mm median / 0.909 mm p95 / 1.301 mm maximum;
+  orientation residual was 0.0000025 rad median / 0.0000125 rad p95 / 0.0000968
+  rad maximum. Minimum joint-limit margin was 0.423 rad. Feedback absolute
+  error was 0.004163 rad p95 and 0.006429 rad maximum, far below the unchanged
+  0.080 rad safety stop. PC socket-arrival-to-command was 1.918 ms median /
+  2.459 ms p95. Offline reconstruction retained 0.060 m cross-arm separation.
+- A post-run official-driver read-only preflight confirmed both arms at rest;
+  position mode was not enabled and no command was sent during that check.
+- This is a technical pass, not yet calibration acceptance. Telemetry confirms
+  motion across translation/rotation components but cannot know which gesture
+  the operator intended. Do not change the candidate file until the owner says
+  whether right/left, up/down, forward/back, screw, nod-yes, and nod-no all felt
+  correct.
+- Verification before the run: focused hardware/dual suite `109 passed` in both
+  environments; full `.venv` and `.venv-arm18` suites `232 passed`; Python,
+  JavaScript, shell syntax, and `git diff --check` passed.
+
+### 2026-08-12 — Milestone 14: Right/Behind accepted at 40% with full gripper
+
+- The clean 0.20 no-gripper evidence profile remains unchanged. A separate
+  `right_dual_bench_40pct_full_gripper_hardware.yaml` profile stages the owner's
+  requested next run on physical right arm `.3`: 0.40 translation/rotation
+  scale, 0.070 m / 0.16 rad reach, full trigger-controlled 0.000–0.040 m
+  gripper travel, and a 45 s cap.
+- The `.2` stationary-arm guard now screens not only the arm path but also the
+  moving gripper aperture. Startup opening, every combined arm/gripper command,
+  and the combined return-to-rest/gripper-close path are checked against the
+  measured dual geometry and unchanged 0.030 m cross-arm margin.
+- The matching MuJoCo check recorded 2,532 rows over 28.971 s, including 2,081
+  active rows, two grip episodes, the complete 0–40 mm simulated gripper range,
+  and zero IK failures. The viewer session ended before the configured 45 s;
+  there is no evidence of an IK stop in its telemetry.
+- Physical evidence is
+  `runs/2026-08-12/20260812-173543_right-dual-bench-40pct-full-gripper-01`:
+  4,043 rows over 44.987 s at 89.849 Hz, 3,705 active rows across three grip
+  episodes, zero IK failures, no arm limiter flags, and no early safety stop.
+  Two Quest sequence numbers were skipped without a reconnect or stale-stream
+  event; every received sequence was unique.
+- Position IK residual was 0.410 mm median / 1.367 mm p95 / 2.565 mm maximum;
+  orientation residual was 0.0000043 rad median / 0.0000295 rad p95 /
+  0.0002470 rad maximum. The target-to-measured-arm gap remained below both
+  moving reach gates: position 10.271 mm p95 / 21.792 mm maximum against 70 mm,
+  and orientation 0.03059 rad p95 / 0.07837 rad maximum against 0.16 rad.
+  Motion was exercised around all three tool-rotation axes, but telemetry still
+  cannot determine whether the operator intended each signed gesture.
+- Joint feedback error was 0.005237 rad p95 by worst joint per sample and
+  0.010144 rad maximum, well below the unchanged 0.080 rad stop. Minimum
+  joint-limit margin was 0.423 rad. PC socket-arrival-to-command was 2.295 ms
+  median / 3.099 ms p95.
+- The trigger covered 0–1 and the physical gripper covered 0.442–40.036 mm.
+  Command-to-feedback error was 0.030 mm p95 / 2.459 mm maximum, below the 3 mm
+  stop. The 152 gripper-only limiter rows are expected velocity shaping, not a
+  fault; the second complete close request reached 1 mm in about 0.434 s.
+- Every outgoing state passed the live 30 mm stationary-arm guard. Offline
+  reconstruction using the last recorded left-rest state retained 60 mm
+  minimum modeled separation. The exact stationary sample is not stored per
+  telemetry row, so this numeric reconstruction does not replace the live
+  fail-closed checks.
+- The owner then reported that everything worked as intended and in the correct
+  direction. This accepts right/left, up/down, forward/back, screw, nod-yes,
+  nod-no, gripper feel, and normal shutdown at the tested 40% scope.
+- Acceptance is preserved in the new
+  `right_behind_all_motions_20260812_accepted.json`; the 2026-07-23 candidate is
+  unchanged as historical evidence. The task catalog and the dual profile's
+  right side now reference the accepted file. The dual right settings were
+  reduced from the untested provisional 0.45 / 0.075 m / 0.18 rad to the exact
+  accepted 0.40 / 0.070 m / 0.16 rad scope. Left/Behind remains pending, so
+  coordinated live output stays configuration-blocked.
+- Verification after these changes: full `.venv` and `.venv-arm18` suites each
+  report `234 passed`; Python compilation and `git diff --check` pass.
+
+### 2026-08-12 — Milestone 15: direct dual-hardware launcher import fixed
+
+- The first operator invocation of `python scripts/run_dual_hardware.py` with a
+  clean `PYTHONPATH` stopped immediately with `ModuleNotFoundError: scripts`.
+  It failed during Python imports, before Quest preflight, controller connection,
+  position mode, or any arm command; neither arm moved.
+- Cause: the launcher imported three sibling launchers through the `scripts.*`
+  package path, but direct script execution places `scripts/` itself rather
+  than the repository root on `sys.path`. The launcher now follows the existing
+  project pattern: package-qualified imports when imported as a module and
+  direct sibling imports when executed as a script.
+- A regression test launches `scripts/run_dual_hardware.py --help` in a child
+  process with `PYTHONPATH` removed. Direct launch was also checked manually in
+  both `.venv` and `.venv-arm18`.
+- Verification: focused hardware/dual suites report `117 passed` in each
+  environment; full `.venv` and `.venv-arm18` suites report `235 passed`; and
+  `git diff --check` passes.
+
+### 2026-08-12 — Milestone 16: first simultaneous physical dual-arm run
+
+- With explicit operator authorization, the left calibration override, both
+  hands selected as Behind/real, and both arms at the exact 0.40 / 0.070 m /
+  0.16 rad scope, both physical arms entered the coordinated launcher. Evidence
+  is `runs/2026-08-12/20260812-180149_dual-40pct-first-coordinated-01`.
+- The telemetry contains 4,045 rows over 44.996 s at 89.874 Hz. The owner
+  clarified that they intentionally changed the live command to 45 s, so the
+  observed duration is correct and there is no duration-control discrepancy.
+- Left was active for 3,906 rows, right for 3,786, and both were active together
+  for 3,786 rows. Both arms exercised substantial ranges on all six joints.
+  There were zero IK failures, arm limiter flags, rejected proposals, fault
+  rows, cross-arm collision rows, or early safety stops. Three initial held
+  rows occurred before fresh bimanual input; the remaining 4,042 rows were not
+  in coordinated hold. Modeled separation remained 0.060 m against 0.030 m.
+- The historical joint-2 tracking failure did not recur. Left joint 2 error was
+  0.002840 rad p95 / 0.007212 rad maximum; right was 0.002988 rad p95 /
+  0.004884 rad maximum. Worst-joint error over either arm was 0.010517 rad,
+  far below the unchanged 0.080 rad time-aligned stop.
+- Dual send skew was 0.445 ms median / 0.754 ms p95 / 4.336 ms maximum, below
+  the 10 ms gate. Control arrival-to-send was 5.662 ms p95 for left and
+  6.144 ms p95 for right. Three isolated Quest sequence numbers were skipped;
+  there was no reconnect or stale episode after initial recovery.
+- The owner confirmed neither trigger was intentionally pressed. Both grippers
+  therefore correctly stayed open at 0.040 m; this run does not validate
+  simultaneous dual gripper motion. The owner subsequently confirmed that both
+  arms worked perfectly in every direction. This accepts both Behind mappings
+  at the tested 40% scope. The post-telemetry return-to-rest was not separately
+  reported.
+
+### 2026-08-12 — Milestone 17: dual Behind directions accepted; issue audit
+
+- The accepted left calibration preserves the exact matrix used during the
+  simultaneous run; no mapping, gain, reach, feedback, collision, or shutdown
+  limit changed. The normal dual profile now selects accepted calibrations on
+  both sides, so future Behind runs do not require
+  `--accept-unvalidated-calibrations`. Explicit current authorization, the
+  exact dual live token, and every independent safety gate still apply.
+- GitHub issues #1–#4 all remain open upstream. Current local evidence rates
+  them as follows: #1 did not reproduce in the 44.996 s run but needs a longer
+  representative stress run; #2 remains unvalidated because it is specifically
+  the front-facing Mirrored profile; #3 has its core three-camera operator UI
+  implemented and accepted, but latency, active pose-rate impact, and a
+  camera-loss hold policy remain; #4 remains because bimanual Apply input still
+  silently disarms wrist calibration and no in-VR reach/clutch indicators exist.
+
+### 2026-08-12 — Milestone 18: front-facing Mirrored bimanual accepted
+
+- With the operator standing in front of and facing the pair, the Mirrored
+  profile completed 4,039 rows over 44.990 s at 89.752 Hz. The right controller
+  drove physical arm `.2` and the left controller drove `.3`, as the swapped
+  front-facing assignment intended. Both arms were active together for 3,229
+  rows. Evidence is
+  `runs/2026-08-12/20260812-181814_dual-mirrored-45s-first-physical-01`.
+- There were zero IK failures, rejected proposals, collision rows, coordinated
+  holds, or fault rows. Dual send skew was 0.748 ms p95 / 5.015 ms maximum,
+  below the unchanged 10 ms gate. Maximum feedback error was 0.011424 rad on
+  `.2` and 0.016873 rad on `.3`, below the unchanged 0.080 rad stop. Modeled
+  separation remained 0.060 m against the 0.030 m margin.
+- The owner reported that Mirrored bimanual motion worked perfectly. This
+  physically accepts the swapped hand-to-arm assignment and Left/Mirror at the
+  tested 0.45 / 0.075 m / 0.18 rad scope. Both trigger streams remained zero,
+  so the run does not accept dual gripper behavior or report shutdown quality.
+- The accepted file preserves the exact candidate matrix; no mapping, gain,
+  reach, feedback, collision, or shutdown limit changed. Future normal
+  Mirrored runs do not require `--accept-unvalidated-calibrations`.
+- GitHub issue #2's two hazardous unknowns—hand assignment and the left mirror
+  transform—are resolved for this bench. Raising gains is optional because the
+  operator accepted 45% performance. The position/rotation convention remains
+  intentionally non-unified but is documented and now accepted on both hands.
+  The formal Quest-driven Mirrored MuJoCo pass requested by the issue remains
+  outstanding, and the upstream issue itself is still open.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
 2. Measure transport RTT/clock offset and repeated controller/encoder reversal
    events before claiming physical p95/p99 latency.
-3. Validate Left/Behind, Left/Mirror, and Right/Behind independently before
-   marking them accepted at 50%.
+3. Preserve Left/Mirror at its accepted 45% scope and both Behind mappings at
+   40%; validate each separately before any promotion to 50%.
 4. The dual-arm architecture in `docs/DUAL_ARM_EXTENSION.md` is implemented:
    bimanual WebXR packet, combined MuJoCo scene, per-arm runtime, coordinated
-   controller, dual telemetry, and three launchers, with offline tests. What
-   remains is operational: measure both arm base transforms (the shipped
-   500 mm values in `configs/dual_widowxai.yaml` are placeholders), then
-   physically accept a per-hand calibration for each arm.
-5. Two-arm driver output stays configuration-blocked until each arm has an
-   explicitly accepted calibration. `require_live_dual_arm_config` enforces
-   this, and the dual token `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` is
-   separate from the single-arm token by design. Do not weaken either gate to
-   make a two-arm run launch.
+   controller, dual telemetry, and three launchers, with offline tests. The
+   measured 500 mm aligned base transforms are recorded, both individual home
+   cycles passed, the two Behind mappings are physically accepted at 40%, and
+   front-facing Mirrored is accepted at 45%. Dual gripper behavior and longer
+   representative reliability remain pending.
+5. Two-arm driver output still requires accepted per-arm calibrations,
+   measured bases, all safety gates, explicit current authorization, and the
+   dual token `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`. The normal Behind
+   Behind and Mirrored profiles now satisfy the stored calibration gate; do not
+   weaken the other gates or reuse a single-arm token.
 6. At 300 mm base separation the two arms collide when yawed roughly 0.25 rad
    toward each other, and the 30 mm clearance margin rejects at about
-   0.20 rad. Both figures come from the 300 mm fixtures in
-   `tests/test_dual_arm_safety.py` and no longer describe the configured
-   bench, which the operator reports at 500 mm. Re-derive them at the measured
-   separation before expecting overlapping bimanual tasks.
+   0.20 rad. Both figures come only from synthetic 300 mm test fixtures and do
+   not describe the measured 500 mm bench. Re-derive task-specific clearance
+   limits at the measured separation before expecting overlapping bimanual
+   tasks.
 7. `scripts/run_cad_sim.py` passes 13 telemetry keys that `TELEMETRY_COLUMNS`
    never declared, so they have always been silently discarded. This is
    pre-existing and left unchanged; `tests/test_dual_arm_safety.py` pins it as
    a known exception so it cannot spread.
+8. Measure camera glass-to-glass latency plus active bimanual WebXR pose-rate
+   impact, and add an operator-critical camera-loss hold policy before treating
+   the accepted three-view UI as ready for unattended remote teleoperation.
 
 The main optimization objective remains: preserve the approximately 30 ms
 estimated controller-capture-to-encoder response and physical smoothness while

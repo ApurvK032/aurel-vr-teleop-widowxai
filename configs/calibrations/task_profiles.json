@@ -1,16 +1,16 @@
 {
   "name": "quest_task_profiles",
-  "status": "right_mirror_accepted_at_50pct_others_pending",
+  "status": "all_mappings_operator_accepted_at_recorded_scopes",
   "profiles": {
-    "left_behind": "configs/calibrations/left_behind_all_motions_20260723_candidate.json",
-    "left_mirror": "configs/calibrations/left_mirror_all_motions_20260723_candidate.json",
-    "right_behind": "configs/calibrations/right_behind_all_motions_20260723_candidate.json",
+    "left_behind": "configs/calibrations/left_behind_all_motions_20260812_accepted.json",
+    "left_mirror": "configs/calibrations/left_mirror_all_motions_20260812_accepted.json",
+    "right_behind": "configs/calibrations/right_behind_all_motions_20260812_accepted.json",
     "right_mirror": "configs/calibrations/right_mirror_20260723_accepted.json"
   },
   "profile_status": {
-    "left_behind": "pending_physical_validation",
-    "left_mirror": "pending_physical_validation",
-    "right_behind": "pending_physical_validation",
+    "left_behind": "accepted_by_operator_at_40pct",
+    "left_mirror": "accepted_by_operator_at_45pct",
+    "right_behind": "accepted_by_operator_at_40pct",
     "right_mirror": "accepted_by_operator_at_50pct"
   },
   "page_selection": {
@@ -45,9 +45,11 @@
   },
   "notes": [
     "Each hand retains its own calibrated task frame and wrist-offset storage.",
-    "Right/Behind has an algebraically equivalent reduced-gain physical acceptance; the canonical Right/Real transport variant remains a test candidate.",
+    "Left/Behind was physically accepted by the operator at 40% scale during a simultaneous dual-arm run on 2026-08-12; its gripper was not commanded.",
+    "Left/Mirror was physically accepted by the operator at 45% scale during a simultaneous front-facing dual-arm run on 2026-08-12; its gripper was not commanded.",
+    "Right/Behind was physically accepted by the operator at 40% scale with full gripper control on 2026-08-12.",
     "Right/Mirror was accepted by the operator at 50% task scale with full gripper control on 2026-07-23.",
-    "Left/Behind, Left/Mirror, and Right/Behind remain pending at the current 50% scale.",
+    "Both Behind mappings are accepted at 40%; Left/Mirror is accepted at 45%; Right/Mirror is accepted at 50%. Acceptance does not transfer to higher scales.",
     "The tagged left Step-3 profile remains the rollback baseline."
   ]
 }

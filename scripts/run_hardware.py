@@ -9,12 +9,15 @@ import numpy as np
 
 from widowxai_quest_teleop.clutch import ClutchController
 from widowxai_quest_teleop.config import (
+    DUAL_ARM_SIDES,
     TASK_PROFILE_NAMES,
     apply_task_profile,
     load_config,
+    parse_dual_arm_config,
     task_profile_for_quest_selection,
 )
 from widowxai_quest_teleop.decoupled_ik import DecoupledIK
+from widowxai_quest_teleop.dual_arm_model import DualArmCollisionModel
 from widowxai_quest_teleop.gripper import trigger_to_gripper_position
 from widowxai_quest_teleop.hardware import (
     CommandGate,
@@ -26,6 +29,12 @@ from widowxai_quest_teleop.hardware import (
 )
 from widowxai_quest_teleop.mapping import ClutchPoseMapper
 from widowxai_quest_teleop.model import WidowXAIModel
+from widowxai_quest_teleop.one_arm_safety import (
+    MARGINAL_START_CONTACT_M,
+    cross_arm_separation,
+    screen_gripper_path,
+    screen_selected_path,
+)
 from widowxai_quest_teleop.motion_limiter import (
     VelocityFeedforwardFilter,
     bounded_command_period,
@@ -592,7 +601,24 @@ def main() -> None:
         choices=TASK_PROFILE_NAMES,
         help="strictly select one fixed hand and Behind/Mirror candidate",
     )
+    parser.add_argument(
+        "--dual-guard-config",
+        help=(
+            "dual profile supplying measured base transforms and the stationary arm; "
+            "requires --moving-side and --live"
+        ),
+    )
+    parser.add_argument(
+        "--moving-side",
+        choices=DUAL_ARM_SIDES,
+        help="physical side moved while the other dual-profile arm stays read-only",
+    )
     args = parser.parse_args()
+
+    if bool(args.dual_guard_config) != bool(args.moving_side):
+        raise SystemExit("--dual-guard-config and --moving-side must be supplied together")
+    if args.dual_guard_config and not args.live:
+        raise SystemExit("the stationary-arm guard is available only for an explicit live run")
 
     config = load_config(args.config)
     page_locked_task_profile = bool(
@@ -628,6 +654,40 @@ def main() -> None:
 
     robot_ip = args.robot_ip or hardware.get("robot_ip")
     end_effector_profile = args.end_effector_profile or hardware.get("end_effector_profile")
+    guard_config = None
+    guard_arms = None
+    guard_model = None
+    guard_side = args.moving_side
+    guard_other = None
+    guard_clearance_m = 0.0
+    if args.dual_guard_config:
+        guard_config = load_config(args.dual_guard_config)
+        try:
+            guard_arms = parse_dual_arm_config(guard_config)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(f"invalid stationary-arm guard configuration: {exc}") from None
+        guard_other = next(side for side in DUAL_ARM_SIDES if side != guard_side)
+        if robot_ip != guard_arms[guard_side].robot_ip:
+            raise SystemExit(
+                f"moving robot IP {robot_ip} does not match "
+                f"arms.{guard_side}.robot_ip {guard_arms[guard_side].robot_ip}"
+            )
+        if not all(guard_arms[side].placement.measured for side in DUAL_ARM_SIDES):
+            raise SystemExit("stationary-arm guard requires measured transforms for both bases")
+        guard_clearance_m = float(guard_config["safety"]["cross_arm_clearance_m"])
+        guard_model = DualArmCollisionModel(
+            {side: guard_arms[side].placement for side in DUAL_ARM_SIDES},
+            xml_path=guard_config["model"]["xml_path"],
+            clearance_m=guard_clearance_m,
+        )
+        config["_stationary_arm_guard"] = {
+            "dual_config": args.dual_guard_config,
+            "moving_side": guard_side,
+            "moving_ip": robot_ip,
+            "stationary_side": guard_other,
+            "stationary_ip": guard_arms[guard_other].robot_ip,
+            "cross_arm_clearance_m": guard_clearance_m,
+        }
     if args.live:
         try:
             validate_live_hardware_timing(config)
@@ -653,12 +713,24 @@ def main() -> None:
             end_effector_variant=END_EFFECTOR_PROFILE_TO_VARIANT[str(end_effector_profile)],
             required_driver_version=str(hardware["driver_version_tested"]),
         )
+        stationary_backend = (
+            TrossenArmBackend(
+                guard_arms[guard_other].robot_ip,
+                end_effector_variant=END_EFFECTOR_PROFILE_TO_VARIANT[
+                    str(end_effector_profile)
+                ],
+                required_driver_version=str(hardware["driver_version_tested"]),
+            )
+            if guard_arms is not None
+            else None
+        )
     else:
         backend = DryRunBackend(
             home_q,
             model.joint_limits,
             gripper_position_m=float(hardware["gripper_open_m"]),
         )
+        stationary_backend = None
 
     quest = config["quest"]
     control_gripper = bool(hardware.get("control_gripper", True))
@@ -671,6 +743,9 @@ def main() -> None:
 
     connected = False
     motion_started = False
+    stationary_connected = False
+    stationary_state = None
+    stationary_next_read_s = 0.0
     try:
         if quest.get("prepare_tabletop_tracking_via_adb", False):
             print("preflight: waking Quest tabletop tracking through ADB")
@@ -730,6 +805,17 @@ def main() -> None:
             f"preflight: driver={state.driver_version} firmware={state.firmware_version} "
             f"q={np.round(state.q_arm, 3).tolist()}"
         )
+        if stationary_backend is not None:
+            stationary_state = stationary_backend.connect()
+            stationary_connected = True
+            stationary_next_read_s = time.perf_counter() + 1.0 / float(
+                hardware["feedback_check_rate_hz"]
+            )
+            print(
+                f"preflight: stationary {guard_other} arm @ "
+                f"{guard_arms[guard_other].robot_ip} is READ-ONLY; "
+                f"q={np.round(stationary_state.q_arm, 3).tolist()}"
+            )
 
         combined_limits = state.joint_limits.copy()
         combined_limits[:6, 0] = np.maximum(combined_limits[:6, 0], model.joint_limits[:, 0])
@@ -742,18 +828,49 @@ def main() -> None:
             solver.set_joint_limits(solver_limits)
         except ValueError as exc:
             raise HardwareSafetyError("physical limits and margin leave invalid IK limits") from exc
-        collision_alpha = model.first_self_collision_on_path(
-            state.q_arm,
-            home_q,
-            start_gripper_q=state.gripper_position_m,
-            end_gripper_q=state.gripper_position_m,
-            samples=hardware["startup_collision_samples"],
-        )
-        if collision_alpha is not None:
-            raise HardwareSafetyError(
-                "pinned 2025 MuJoCo collision geometry rejects the startup ramp "
-                f"near {collision_alpha * 100:.1f}%"
+        if guard_model is not None:
+            startup_separation = screen_selected_path(
+                model,
+                guard_model,
+                moving_side=guard_side,
+                moving_start=state.q_arm,
+                moving_end=home_q,
+                holding_q=stationary_state.q_arm,
+                moving_gripper_m=state.gripper_position_m,
+                holding_gripper_m=stationary_state.gripper_position_m,
+                samples=int(hardware["startup_collision_samples"]),
+                clearance_m=guard_clearance_m,
+                allow_marginal_start_m=MARGINAL_START_CONTACT_M,
             )
+            return_separation = screen_selected_path(
+                model,
+                guard_model,
+                moving_side=guard_side,
+                moving_start=home_q,
+                moving_end=np.asarray(hardware["rest_q_rad"], dtype=float),
+                holding_q=stationary_state.q_arm,
+                moving_gripper_m=state.gripper_position_m,
+                holding_gripper_m=stationary_state.gripper_position_m,
+                samples=int(hardware["startup_collision_samples"]),
+                clearance_m=guard_clearance_m,
+            )
+            print(
+                "preflight: stationary-arm guarded startup/shutdown paths clear; "
+                f"minimum separation {min(startup_separation, return_separation):.3f} m"
+            )
+        else:
+            collision_alpha = model.first_self_collision_on_path(
+                state.q_arm,
+                home_q,
+                start_gripper_q=state.gripper_position_m,
+                end_gripper_q=state.gripper_position_m,
+                samples=hardware["startup_collision_samples"],
+            )
+            if collision_alpha is not None:
+                raise HardwareSafetyError(
+                    "pinned 2025 MuJoCo collision geometry rejects the startup ramp "
+                    f"near {collision_alpha * 100:.1f}%"
+                )
         startup_max_delta = np.asarray(
             hardware.get("startup_max_joint_delta_rad", max_delta),
             dtype=float,
@@ -773,6 +890,23 @@ def main() -> None:
         if np.max(np.abs(settled.q_arm - home_q)) > hardware["max_feedback_error_rad"]:
             raise HardwareSafetyError("arm did not reach home within the feedback limit")
         if control_gripper:
+            if stationary_backend is not None:
+                stationary_state = stationary_backend.read_state()
+                gripper_separation = screen_gripper_path(
+                    guard_model,
+                    moving_side=guard_side,
+                    moving_q=home_q,
+                    holding_q=stationary_state.q_arm,
+                    moving_start_gripper_m=settled.gripper_position_m,
+                    moving_end_gripper_m=float(hardware["gripper_open_m"]),
+                    holding_gripper_m=stationary_state.gripper_position_m,
+                    clearance_m=guard_clearance_m,
+                    samples=int(hardware["startup_collision_samples"]),
+                )
+                print(
+                    "preflight: stationary-arm guarded gripper-open path clear; "
+                    f"minimum separation {gripper_separation:.3f} m"
+                )
             settled = open_gripper_at_home(backend, model, settled, home_q, config)
         print(
             "home reached: keep grip released; "
@@ -1042,6 +1176,20 @@ def main() -> None:
                 command_gate.validate(q_command, gripper_command)
                 if model.in_self_collision(q_command, gripper_command):
                     raise HardwareSafetyError("pinned 2025 MuJoCo model predicts a self-collision")
+                if stationary_backend is not None:
+                    now_s = time.perf_counter()
+                    if now_s >= stationary_next_read_s:
+                        stationary_state = stationary_backend.read_state()
+                        stationary_next_read_s = now_s + feedback_period
+                    cross_arm_separation(
+                        guard_model,
+                        moving_side=guard_side,
+                        moving_q=q_command,
+                        holding_q=stationary_state.q_arm,
+                        moving_gripper_m=gripper_command,
+                        holding_gripper_m=stationary_state.gripper_position_m,
+                        clearance_m=guard_clearance_m,
+                    )
                 if quest_synchronized and command_spacing_stage == "before_send":
                     pre_send_wait_s = minimum_command_spacing_wait(
                         last_command_send_s,
@@ -1174,6 +1322,47 @@ def main() -> None:
             returned_to_rest = False
             if motion_started and hardware.get("return_to_rest_on_exit", True):
                 try:
+                    if stationary_backend is not None:
+                        moving_state = backend.read_state()
+                        stationary_state = stationary_backend.read_state()
+                        shutdown_separation = screen_selected_path(
+                            model,
+                            guard_model,
+                            moving_side=guard_side,
+                            moving_start=moving_state.q_arm,
+                            moving_end=np.asarray(hardware["rest_q_rad"], dtype=float),
+                            holding_q=stationary_state.q_arm,
+                            moving_gripper_m=moving_state.gripper_position_m,
+                            holding_gripper_m=stationary_state.gripper_position_m,
+                            samples=int(hardware["startup_collision_samples"]),
+                            clearance_m=guard_clearance_m,
+                            moving_end_gripper_m=(
+                                float(hardware["rest_gripper_m"])
+                                if control_gripper
+                                else moving_state.gripper_position_m
+                            ),
+                            allow_marginal_start_m=MARGINAL_START_CONTACT_M,
+                        )
+                        print(
+                            "shutdown: stationary-arm guarded return path clear; "
+                            f"minimum separation {shutdown_separation:.3f} m"
+                        )
+                        if control_gripper:
+                            gripper_shutdown_separation = screen_gripper_path(
+                                guard_model,
+                                moving_side=guard_side,
+                                moving_q=np.asarray(hardware["rest_q_rad"], dtype=float),
+                                holding_q=stationary_state.q_arm,
+                                moving_start_gripper_m=moving_state.gripper_position_m,
+                                moving_end_gripper_m=float(hardware["rest_gripper_m"]),
+                                holding_gripper_m=stationary_state.gripper_position_m,
+                                clearance_m=guard_clearance_m,
+                                samples=int(hardware["startup_collision_samples"]),
+                            )
+                            print(
+                                "shutdown: stationary-arm guarded gripper-close path clear; "
+                                f"minimum separation {gripper_shutdown_separation:.3f} m"
+                            )
                     return_to_rest(
                         backend,
                         model,
@@ -1192,8 +1381,12 @@ def main() -> None:
             backend.close()
         except Exception as exc:
             shutdown_warnings.append(f"driver cleanup failed: {exc}")
-        finally:
-            receiver.stop()
+        if stationary_backend is not None:
+            try:
+                stationary_backend.close()
+            except Exception as exc:
+                shutdown_warnings.append(f"stationary driver cleanup failed: {exc}")
+        receiver.stop()
         for warning in shutdown_warnings:
             print(
                 f"EMERGENCY SHUTDOWN WARNING: {warning}; cut controller power now",

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,6 +11,22 @@ import pytest
 
 import scripts.run_dual_hardware as dual_hardware
 from widowxai_quest_teleop.safety import TimeAlignedCommandHistory
+
+
+def test_dual_hardware_launcher_runs_directly_with_clean_pythonpath() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, "scripts/run_dual_hardware.py", "--help"],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Fail-closed bimanual WidowXAI demo" in result.stdout
 
 
 class FeedbackBackend:

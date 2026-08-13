@@ -8,17 +8,33 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from scripts.preflight_dual_hardware import offline_checks
-from scripts.run_dual_sim import dual_arm_telemetry_record
-from scripts.run_hardware import (
-    gripper_feedback_tolerance,
-    make_startup_command_gate,
-    resolve_demo_duration,
-    teleop_gripper_limits,
-    validate_hardware_config,
-    validate_live_hardware_timing,
-    validate_time_aligned_feedback,
-)
+if __package__:
+    from scripts.preflight_dual_hardware import offline_checks
+    from scripts.run_dual_sim import dual_arm_telemetry_record
+    from scripts.run_hardware import (
+        gripper_feedback_tolerance,
+        make_startup_command_gate,
+        resolve_demo_duration,
+        teleop_gripper_limits,
+        validate_hardware_config,
+        validate_live_hardware_timing,
+        validate_time_aligned_feedback,
+    )
+else:
+    # `python scripts/run_dual_hardware.py` puts scripts/, not the repository
+    # root, on sys.path. Import sibling launchers directly in that supported
+    # execution mode; package imports remain stable for tests and `-m` usage.
+    from preflight_dual_hardware import offline_checks
+    from run_dual_sim import dual_arm_telemetry_record
+    from run_hardware import (
+        gripper_feedback_tolerance,
+        make_startup_command_gate,
+        resolve_demo_duration,
+        teleop_gripper_limits,
+        validate_hardware_config,
+        validate_live_hardware_timing,
+        validate_time_aligned_feedback,
+    )
 from widowxai_quest_teleop.config import (
     DUAL_ARM_SIDES,
     DualArmConfigError,

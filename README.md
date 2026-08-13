@@ -27,6 +27,7 @@ latency telemetry.
 | Automatic rest → home → rest | Working |
 | Bimanual WebXR capture, dual-arm MuJoCo, coordinated runtime | Working |
 | Two-arm physical operation | Implemented, blocked pending per-arm calibration acceptance |
+| Configurable scene/left-wrist/right-wrist camera views | Operator-accepted with D455 + two D405s |
 
 The current single-arm profile is
 [`configs/quest_50pct_hardware.yaml`](configs/quest_50pct_hardware.yaml).
@@ -52,6 +53,12 @@ Quest controller
   → MuJoCo or Trossen driver
   → WidowXAI
 ```
+
+Camera video uses a deliberately separate path: each selected V4L2 color camera
+is captured and JPEG encoded by its own FFmpeg process, then exposed through a
+latest-frame WebSocket service on port 8444. Camera traffic never enters the
+90 Hz pose WebSocket on port 8443. The browser assigns stable camera serials to
+Scene, Left wrist, and Right wrist without a code change or service restart.
 
 Grip acts as a deadman and clutch. Pressing it anchors the current controller
 and robot poses. Releasing it holds the last safe command and lets the operator
@@ -80,6 +87,22 @@ Connect the Quest by USB, accept USB debugging, and start the local relay:
 bash scripts/restart_localhost.sh
 ```
 
+To additionally start the configurable camera service and expose both ports
+through USB ADB reverse:
+
+```bash
+bash scripts/restart_localhost.sh --with-cameras
+```
+
+The Camera Setup section lists compatible cameras attached to the PC. Assign
+each device once to Scene, Left wrist, or Right wrist, enable the views wanted
+in passthrough, and press **Apply camera setup**. Assignments persist by serial;
+an unselected camera produces no passthrough panel. The adaptive overview shows
+one, two, or three world-anchored panels high above the work area so they do not
+obstruct the direct passthrough task view. With both
+grips released, right-controller **B** smoothly cycles the enabled focused
+views and returns to overview.
+
 Open `http://localhost:8443/` in the Quest Browser. For the accepted profile,
 select **Right + Mirrored**, press **Apply input**, and enter passthrough.
 
@@ -94,6 +117,8 @@ env -u PYTHONPATH .venv/bin/python scripts/run_live_sim.py \
 Windows setup, Quest details, physical-arm prerequisites, calibration, and
 troubleshooting are in the
 **[setup and operation guide](docs/SETUP_AND_OPERATION.md)**.
+Current milestones, measured performance, and open blockers are tracked in
+**[project progress](docs/PROJECT_PROGRESS.md)**.
 
 ## Physical arm
 
@@ -135,10 +160,10 @@ env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
   --config configs/dual_widowxai.yaml
 ```
 
-For the provisional side-by-side tabletop environment requested for the first
-dual test, add `--tabletop --inline-viewer`. It places the bases 500 mm apart
-from the profile and adds a collidable 1000 × 700 × 40 mm tabletop whose rear
-edge is 100 mm behind the base centerline:
+For the measured side-by-side base layout, add `--tabletop --inline-viewer`.
+It places the parallel, equal-height bases exactly 500 mm apart and adds a
+collidable 1000 × 700 × 40 mm tabletop whose rear edge is 50.8 mm (2 in)
+behind the base centerline:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
@@ -147,11 +172,13 @@ env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
   --label dual-500mm-tabletop-mujoco
 ```
 
-The table dimensions are simulation assumptions, printed at launch and saved
-in the telemetry configuration snapshot. Override them with
-`--table-width-m`, `--table-depth-m`, `--table-thickness-m`, and
-`--base-rear-inset-m` after measuring the bench. An arm/table contact is a
-coordinated collision rejection, not just a visual overlap.
+The 500 mm base separation, aligned orientation, and 50.8 mm rear inset were
+measured on 2026-08-12. The table width, depth, and thickness remain simulation
+assumptions; all values are printed at launch and saved in the telemetry
+configuration snapshot. Override them with `--table-width-m`,
+`--table-depth-m`, `--table-thickness-m`, and `--base-rear-inset-m` when the
+bench changes. An arm/table contact is a coordinated collision rejection, not
+just a visual overlap.
 
 No-motion preflight, including simultaneous and one-arm-moving path screening
 in the combined scene:
@@ -163,17 +190,19 @@ env -u PYTHONPATH .venv/bin/python scripts/preflight_dual_hardware.py \
 
 `scripts/run_dual_hardware.py` implements the full physical lifecycle
 (lockstep rest→home ramp, per-arm grippers, coordinated fault hold, sequential
-return to rest). **Live two-arm output is currently blocked by configuration**:
-it requires an explicitly accepted calibration for each arm, and both per-hand
-Behind/Parallel calibrations are still candidates. It also requires its own
+return to rest). Both Behind calibrations are physically accepted at the exact
+40% scope in `configs/dual_widowxai.yaml`, so that profile satisfies the stored
+calibration gate without the temporary override. Live mode still requires
+explicit current authorization, every independent safety gate, and its own
 `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token; the single-arm
 `LIVE-WIDOWXAI-<ip>` token can never enable two arms.
 
-Base transforms in `configs/dual_widowxai.yaml` encode a 500 mm separation and
-are **placeholders**. Measure both arm bases against one shared world frame
-before any physical work — every cross-arm collision result depends on them.
-The live gate requires each `base_transform.measurement_status` to be
-`measured`; the calibration override cannot bypass this geometry gate.
+Base transforms in `configs/dual_widowxai.yaml` record the measured 2026-08-12
+bench geometry: 500 mm separation, no forward/vertical offset, equal height,
+parallel bases, no relative yaw, and a 50.8 mm rear-edge inset. Both explicit
+`base_transform.measurement_status` values are `measured`. The calibration
+override remains available only for deliberate experimental profiles; it does
+not convert candidate evidence into acceptance.
 
 Architecture, staged validation, and the definition of done are in
 [`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md).

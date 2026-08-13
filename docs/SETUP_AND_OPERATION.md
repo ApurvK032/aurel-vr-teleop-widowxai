@@ -109,6 +109,62 @@ The mounted-state override keeps WebXR awake but cannot replace optical
 tracking. If the headset is off your face, keep it upright with its cameras
 facing the controller workspace.
 
+### Configure scene and wrist operator views
+
+Connect the cameras and use the camera-enabled restart command:
+
+```bash
+bash scripts/restart_localhost.sh --with-cameras
+```
+
+This creates two independent ADB reverse paths:
+
+- `tcp:8443` serves the operator page and the capacity-one 90 Hz pose relay;
+- `tcp:8444` serves separately encoded, latest-frame camera WebSockets.
+
+The camera service discovers physical V4L2 cameras with a 640 × 480, 30 FPS
+YUYV color node, including RealSense D405 and D455 cameras. On the first run,
+stable serial order preserves the old two-camera behavior by assigning the
+first camera to Scene and the second to Right wrist. After that, open the
+Camera Setup section in the browser and configure:
+
+- Scene;
+- Left wrist;
+- Right wrist.
+
+Each row has a physical-camera dropdown and a **Show in passthrough** checkbox.
+A device can be assigned only once. Selecting **No camera** disables that view;
+unchecking a selected view hides/stops it without forgetting its assignment.
+Press **Apply camera setup** before entering passthrough. The configuration is
+saved by stable serial on the PC, not by changing `/dev/video*` numbers.
+
+Serials can still be supplied during first-run or recovery startup:
+
+```bash
+bash scripts/restart_localhost.sh --with-cameras \
+  --scene-serial <V4L2-ID_SERIAL_SHORT> \
+  --left-wrist-serial <V4L2-ID_SERIAL_SHORT> \
+  --right-wrist-serial <V4L2-ID_SERIAL_SHORT>
+```
+
+The serial used here is the V4L2/ASIC `ID_SERIAL_SHORT` printed by the camera
+service, which may differ from the RealSense marketing serial printed by
+`rs-enumerate-devices -s`.
+
+The initial passthrough layout adapts to one, two, or three enabled views and
+keeps them 0.18 m above the earlier layout to preserve the direct task view.
+Their position and orientation are anchored
+to the Quest `local-floor` world frame when passthrough starts, so head movement
+does not drag the panels along with it. With multiple views enabled and both
+grips released, right-controller **B** smoothly cycles overview, then each
+enabled camera in Scene → Left wrist → Right wrist order. Focus mode retains
+every other enabled camera as a small preview.
+
+The ordinary page includes the same three-state cycle button for desktop
+verification. A missing or stale stream shows `VIDEO LOST`; camera traffic
+never shares `/ws` with controller poses. This first milestone provides RGB
+only and does not yet make video freshness a physical-motion safety gate.
+
 ## Run in MuJoCo
 
 Keep the relay running and start:
