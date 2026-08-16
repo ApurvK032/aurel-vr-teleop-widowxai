@@ -190,10 +190,17 @@ env -u PYTHONPATH .venv/bin/python scripts/preflight_dual_hardware.py \
 
 `scripts/run_dual_hardware.py` implements the full physical lifecycle
 (lockstep rest→home ramp, per-arm grippers, coordinated fault hold, sequential
-return to rest). Both Behind calibrations are physically accepted at the exact
-40% scope in `configs/dual_widowxai.yaml`, so that profile satisfies the stored
-calibration gate without the temporary override. Live mode still requires
-explicit current authorization, every independent safety gate, and its own
+return to rest). Both Behind calibrations are physically accepted at 40%, so
+`configs/dual_widowxai.yaml` satisfies the stored calibration gate without the
+temporary override. Its response is currently staged at 60% translation and
+60% rotation for validation. Collision recovery is capped at 0.010 rad per
+joint per tick. The experimental measured-feedback load yield was removed
+after one physical activation caused 1.36 s of command-direction oscillation;
+it must not be restored without a delay-stable design and simulation that
+models encoder lag. The 0.08 rad hard feedback stop, 30 mm clearance, accepted
+reach envelope, and 10 ms command-skew gate remain unchanged. Live mode still
+requires explicit current authorization, every independent safety gate, and
+its own
 `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token; the single-arm
 `LIVE-WIDOWXAI-<ip>` token can never enable two arms.
 

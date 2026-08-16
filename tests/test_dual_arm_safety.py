@@ -17,6 +17,7 @@ from widowxai_quest_teleop.config import (
 )
 from widowxai_quest_teleop.dual_arm_coordinator import build_dual_arm_system
 from widowxai_quest_teleop.dual_arm_model import (
+    CollisionReport,
     DualArmCollisionModel,
     TabletopGeometry,
 )
@@ -98,6 +99,18 @@ def test_shipped_dual_profile_loads_and_records_both_arms(dual_config) -> None:
     assert arms["right"].placement.quaternion_wxyz.tolist() == pytest.approx(
         [1.0, 0.0, 0.0, 0.0]
     )
+    # The owner requested 60% translation and rotation response. The accepted
+    # 70 mm / 0.16 rad per-clutch reach envelope and hard safety gates remain.
+    for side in ("left", "right"):
+        assert arms[side].settings["translation_scale"] == pytest.approx(0.60)
+        assert arms[side].settings["rotation_scale"] == pytest.approx(0.60)
+        assert arms[side].settings["position_reach_limit_m"] == pytest.approx(0.070)
+        assert arms[side].settings["rotation_reach_limit_rad"] == pytest.approx(0.16)
+    assert dual_config["safety"]["cross_arm_clearance_m"] == pytest.approx(0.030)
+    assert dual_config["safety"]["collision_recovery_max_joint_delta_rad"] == pytest.approx(
+        [0.010] * 6
+    )
+    assert dual_config["hardware"]["max_feedback_error_rad"] == pytest.approx(0.08)
     # Each arm uses a calibration measured for its own controller hand.
     assert "left" in arms["left"].calibration
     assert "right" in arms["right"].calibration
@@ -706,13 +719,19 @@ def test_tabletop_dimensions_fail_closed() -> None:
 # -- coordinated control ---------------------------------------------------
 
 
-def bimanual_sample(sequence: int, *, grip: float = 0.9, left_tracked: bool = True):
+def bimanual_sample(
+    sequence: int,
+    *,
+    grip: float = 0.9,
+    left_tracked: bool = True,
+    x_offset: float = 0.0,
+):
     def hand(sign: float, tracked: bool) -> dict:
         block = {"tracked": tracked, "mapping_mode": "real"}
         if tracked:
             block.update(
                 {
-                    "position": [0.30, sign * 0.20, 0.25],
+                    "position": [0.30 + x_offset, sign * 0.20, 0.25],
                     "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
                     "grip": grip,
                     "trigger": 0.0,
@@ -824,6 +843,47 @@ def test_a_cross_arm_collision_rejects_both_arms_commands(dual_config) -> None:
         assert arms[side].rejected_commands == 1
 
 
+def test_a_clear_tick_resumes_through_a_bounded_collision_ramp(dual_config) -> None:
+    """Recovery must not accept a far-ahead clear target in one tick."""
+
+    arms, _, coordinator = build_system(dual_config)
+    for sequence in range(8):
+        coordinator.step(bimanual_sample(sequence), limiter_dt=0.011)
+
+    class ToggleCollision:
+        colliding = True
+
+        def check(self, *_args, **_kwargs):
+            if self.colliding:
+                return CollisionReport(
+                    colliding=True,
+                    kind="cross-arm-clearance",
+                    separation_m=0.029,
+                )
+            return CollisionReport(colliding=False, separation_m=0.031)
+
+    model = ToggleCollision()
+    coordinator.collision_model = model
+    blocked = coordinator.step(bimanual_sample(8, x_offset=0.10), limiter_dt=0.011)
+    assert blocked.accepted is False
+    assert set(blocked.held_sides) == {"left", "right"}
+    committed = {side: arms[side].q_command.copy() for side in ("left", "right")}
+
+    model.colliding = False
+    resumed = coordinator.step(bimanual_sample(9, x_offset=0.10), limiter_dt=0.011)
+    assert resumed.accepted is True
+    assert resumed.collision.colliding is False
+    assert resumed.control_state == "collision_recovery"
+    assert any(
+        "collision_recovery" in resumed.proposals[side].limiter_flags
+        for side in ("left", "right")
+    )
+    for side in ("left", "right"):
+        assert arms[side].rejected_commands == 1
+        assert np.max(np.abs(arms[side].q_command - committed[side])) <= 0.010 + 1e-12
+        np.testing.assert_allclose(arms[side].feedforward_velocity, np.zeros(6))
+
+
 def test_external_arm_fault_rejects_and_holds_both_commands(dual_config) -> None:
     arms, _, coordinator = build_system(dual_config)
     for sequence in range(8):
@@ -912,7 +972,9 @@ def test_dual_telemetry_declares_both_arms_and_skew() -> None:
         assert f"{side}_feedback_reference_state" in DUAL_ARM_TELEMETRY_COLUMNS
         assert f"{side}_feedback_newest_command_age_ms" in DUAL_ARM_TELEMETRY_COLUMNS
         assert f"{side}_feedback_history_span_ms" in DUAL_ARM_TELEMETRY_COLUMNS
+        assert f"{side}_command_send_duration_ms" in DUAL_ARM_TELEMETRY_COLUMNS
     assert "command_skew_ms" in DUAL_ARM_TELEMETRY_COLUMNS
+    assert "control_state" in DUAL_ARM_TELEMETRY_COLUMNS
     assert "cross_arm_collision" in DUAL_ARM_TELEMETRY_COLUMNS
     assert "coordinated_hold" in DUAL_ARM_TELEMETRY_COLUMNS
     # No unprefixed single-arm joint column may leak in and hide an arm.

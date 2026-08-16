@@ -140,6 +140,53 @@ def test_idle_row_does_not_reuse_previous_command_send_times() -> None:
     assert sent_epoch == {"left": 201, "right": 202}
 
 
+class SendingBackend:
+    def __init__(self) -> None:
+        self.commands = 0
+
+    def send_positions(self, *_args, **_kwargs) -> None:
+        self.commands += 1
+
+
+def test_each_driver_send_duration_and_skew_are_measured(monkeypatch) -> None:
+    channels = {
+        side: dual_hardware.ArmChannel(side, SendingBackend())
+        for side in ("left", "right")
+    }
+    for arm_channel in channels.values():
+        arm_channel.command_history = TimeAlignedCommandHistory(np.zeros(6), 0.5, 0.0)
+    arms = {
+        side: SimpleNamespace(
+            q_command=np.zeros(6),
+            gripper_command_m=0.04,
+            feedforward_filter=None,
+            feedforward_velocity=np.zeros(6),
+        )
+        for side in ("left", "right")
+    }
+    clock = iter(
+        [
+            1_000_000_000,
+            1_001_000_000,
+            1_002_000_000,
+            1_014_000_000,
+        ]
+    )
+    monkeypatch.setattr(dual_hardware.time, "perf_counter_ns", lambda: next(clock))
+    monkeypatch.setattr(dual_hardware.time, "time_ns", lambda: 2_000_000_000)
+
+    skew_s = dual_hardware.send_dual_commands(
+        channels, arms, control_gripper=True
+    )
+    durations = dual_hardware.command_send_duration_telemetry(
+        channels, command_sent=True
+    )
+
+    assert skew_s == pytest.approx(0.013)
+    assert durations == pytest.approx({"left": 1.0, "right": 12.0})
+    assert skew_s > 0.010
+
+
 def test_tracking_fault_sample_is_retained_for_the_stop_row(monkeypatch) -> None:
     measured = np.zeros(6)
     measured[2] = 0.101761

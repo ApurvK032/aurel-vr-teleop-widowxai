@@ -1,8 +1,12 @@
 # Dual-arm bimanual profile: two WidowXAI arms, both Quest controllers.
 #
-# STATUS: both Behind calibrations are physically accepted at the exact 0.40
-# settings below. Live output still requires explicit current authorization,
-# the dual live token, and every independent safety gate.
+# STATUS: both Behind mappings are physically accepted at 0.40. At the owner's
+# request, translation and rotation response are staged at 0.60 below for the
+# marker-separation benchmark. Bounded collision recovery remains active. The
+# physically unstable measured-feedback load-yield experiment is removed. The
+# reach, collision, tracking, joint, stale-stream, and shutdown limits are
+# unchanged. Live output still requires explicit current authorization, the
+# dual live token, and every independent safety gate.
 #
 # BASE GEOMETRY MEASURED 2026-08-12. In a shared frame whose origin is midway
 # between the bases, +X points forward, +Y points toward the left arm, and +Z
@@ -44,10 +48,12 @@ arms:
       measurement_status: measured
       position_m: [0.0, 0.25, 0.0]
       quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
-    # Physically accepted during the simultaneous dual-arm run on 2026-08-12.
-    # The left gripper was not commanded and remains a separate test item.
-    translation_scale: 0.40
-    rotation_scale: 0.40
+    # Mapping accepted at 0.40 on 2026-08-12. Translation and rotation response
+    # are 0.60 for the owner-requested marker benchmark. The response remains
+    # unvalidated for general use.
+    # The left gripper was not commanded in the acceptance run.
+    translation_scale: 0.60
+    rotation_scale: 0.60
     position_reach_limit_m: 0.070
     rotation_reach_limit_rad: 0.16
 
@@ -61,11 +67,12 @@ arms:
       measurement_status: measured
       position_m: [0.0, -0.25, 0.0]
       quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
-    # Physically accepted with full gripper control on 2026-08-12. Do not
-    # promote these to the earlier provisional 0.45 / 0.075 m / 0.18 rad values
-    # without a separate run.
-    translation_scale: 0.40
-    rotation_scale: 0.40
+    # Mapping and gripper accepted at 0.40 on 2026-08-12. Translation and
+    # rotation response are 0.60 for the owner-requested marker benchmark. The
+    # response remains unvalidated for general use. Reach and every hard safety
+    # limit remain at the accepted values.
+    translation_scale: 0.60
+    rotation_scale: 0.60
     position_reach_limit_m: 0.070
     rotation_reach_limit_rad: 0.16
 
@@ -78,6 +85,10 @@ safety:
   # Reject a commanded state whose closest left-to-right geometry pair is
   # nearer than this, instead of waiting for actual contact.
   cross_arm_clearance_m: 0.030
+  # After a collision rejection, catch up through bounded commands instead of
+  # accepting a far-ahead controller target in one tick.
+  collision_recovery_max_joint_delta_rad: [0.010, 0.010, 0.010, 0.010, 0.010, 0.010]
+  collision_recovery_max_gripper_delta_m: 0.001
   # Maximum acceptable measured gap between the two arms' driver sends. This
   # is recorded and enforced, never assumed from single-loop ordering.
   max_command_skew_s: 0.010

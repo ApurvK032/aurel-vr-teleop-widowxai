@@ -36,6 +36,7 @@ def dual_arm_telemetry_record(
     pre_consume_wait_s: float,
     pre_send_wait_s: float,
     arms,
+    send_duration_ms_by_side: dict[str, float] | None = None,
 ) -> dict[str, object]:
     """Flatten one coordinated tick into a single dual-arm telemetry row."""
 
@@ -57,6 +58,7 @@ def dual_arm_telemetry_record(
         "mailbox_overwrite_count": overwrite_count,
         "reconnect_generation": "" if sample is None else sample.reconnect_generation,
         "head_quaternion_wxyz": "" if sample is None else sample.head_quaternion_wxyz,
+        "control_state": tick.control_state,
         "command_skew_ms": skew_ms,
         "cross_arm_collision": tick.collision.colliding,
         "cross_arm_collision_kind": tick.collision.kind,
@@ -106,6 +108,11 @@ def dual_arm_telemetry_record(
                 f"{side}_ik_end_monotonic_ns": proposal.ik_end_monotonic_ns,
                 f"{side}_command_send_monotonic_ns": send_ns_by_side.get(side, 0),
                 f"{side}_command_send_epoch_ns": send_epoch_ns_by_side.get(side, 0),
+                f"{side}_command_send_duration_ms": (
+                    ""
+                    if send_duration_ms_by_side is None
+                    else send_duration_ms_by_side.get(side, "")
+                ),
                 f"{side}_q_des": proposal.q_des,
                 f"{side}_q_cmd": arm.q_command,
                 f"{side}_q_feedforward_velocity": arm.feedforward_velocity,

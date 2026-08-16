@@ -105,6 +105,15 @@ the table's rear edge. Their explicit `measurement_status` is `measured`. Live
 mode still rejects any other status, including when the calibration-only
 override is supplied.
 
+Both Behind mappings are accepted at 40%. The active profile now stages 60%
+translation and 60% rotation response for the owner-requested marker task;
+that gain is not yet accepted for general use. Post-collision recovery is
+limited to 0.010 rad per joint per tick. The measured-feedback load-yield
+experiment is deliberately absent after its physical activation oscillated
+both arms. Position/rotation reach remains 0.070 m / 0.16 rad per clutch; the
+hard 0.08 rad feedback stop and 0.030 m collision margin are unchanged.
+Mirrored remains at its separately accepted 45% scope.
+
 Live two-arm output additionally requires an explicitly accepted calibration
 for each arm and the dual `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token. Do
 not use the single-arm profiles or token for two arms.

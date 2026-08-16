@@ -89,6 +89,7 @@ DUAL_ARM_SHARED_COLUMNS = [
     "mailbox_overwrite_count",
     "reconnect_generation",
     "head_quaternion_wxyz",
+    "control_state",
     # Coordinated dual-arm state. Skew is measured between the two driver
     # sends, never assumed from the fact that both happened in one loop.
     "command_skew_ms",
@@ -121,6 +122,7 @@ DUAL_ARM_PER_ARM_COLUMNS = [
     "ik_end_monotonic_ns",
     "command_send_monotonic_ns",
     "command_send_epoch_ns",
+    "command_send_duration_ms",
     "feedback_read_monotonic_ns",
     "feedback_sample_fresh",
     "feedback_reference_state",

@@ -273,6 +273,12 @@ class ArmRuntime:
             proposal.feedforward_velocity, dtype=float
         ).reshape(6)
 
+    def commit_bounded_override(self, proposal: ArmProposal) -> None:
+        """Commit an externally bounded safe state and reset all shaping there."""
+
+        self.commit(proposal)
+        self._reset_shaping()
+
     def reject(self) -> None:
         """Discard a proposal and restore shaping to the last accepted command.
 

@@ -1421,20 +1421,254 @@ changing another variable.
   The formal Quest-driven Mirrored MuJoCo pass requested by the issue remains
   outstanding, and the upstream issue itself is still open.
 
+### 2026-08-14 — Milestone 19: Behind response staged at 60%; collision provenance
+
+- The owner reported that 40% response is too slow for real-time marker
+  manipulation and explicitly requested 60%. Both `translation_scale` and
+  `rotation_scale` in `configs/dual_widowxai.yaml` are therefore staged at
+  0.60. The per-clutch reach limits remain 0.070 m / 0.16 rad and every joint,
+  feedback, collision, stale-stream, command-skew, and shutdown gate is
+  unchanged. Behind mapping evidence remains accepted at 40%; 60% response is
+  pending MuJoCo and physical acceptance. Mirrored remains unchanged at its
+  accepted 45% scope.
+- Git history confirms that commit `487a49f` (`prelim dual arm
+  implementation`, 2026-07-27, authored by `perseusdg`) introduced the core
+  combined-scene collision behavior: screen both proposals together, reject
+  both when the scene collides or enters the configured clearance margin, keep
+  the last accepted commands, continue the loop, and automatically accept a
+  later clear proposal. This was present before the current stabilization work.
+- The stabilization branch retained that policy and made it trustworthy for
+  this bench: measured 500 mm base transforms, tabletop collision geometry,
+  the MuJoCo distance-query workaround, fail-closed live gates, startup/path
+  screens, truthful collision/clearance telemetry, and physical/simulation
+  validation. Do not describe the core reject/hold/resume idea as newly added
+  by this branch.
+- Offline validation after the gain change and explicit recovery regression:
+  `52 passed` in the focused dual safety suite, `236 passed` in each of `.venv`
+  and `.venv-arm18`, the no-contact dual preflight passed, and
+  `git diff --check` passed. No arm controller was contacted.
+
+### 2026-08-14 — Milestone 20: 60% run stopped on genuine wrist tracking error
+
+- The owner requested `--duration 120`, but `hardware.max_demo_duration_s` in
+  the dual profile remains 60.0, so the launcher correctly announced `60 s
+  maximum`. That cap was not reached: the latest run stopped after 20.681 s.
+  Evidence is
+  `runs/2026-08-14/20260814-164138_dual-behind-60pct-marker-validation-01`.
+- The stop was the unchanged time-aligned feedback gate on the left arm's
+  zero-based joint 4 (the fifth arm joint / wrist rotation): 0.081099 rad
+  against the 0.080000 rad limit. Its reference was `interpolated`, the newest
+  command was only 0.7 ms old, and history spanned 510.7 ms. This rules out the
+  stale/clamped-reference mechanism suspected in the historical joint-2 issue.
+- This was not a one-sample unexplained outlier. Left joint-4 error remained at
+  or above 0.070 rad for 67 telemetry rows from 19.793 s onward and reached
+  0.081099 rad. Right joint 4 simultaneously reached 0.075754 rad. Left/right
+  maximum-error p95 values were 0.049050 / 0.039362 rad. Both grips and both
+  triggers were fully pressed at the final sample, both streams were fresh,
+  there were no limiter flags, and the final command was not collision-rejected.
+- The collision system behaved as designed earlier in the same run: 75
+  clearance rejections occurred between 12.725 and 14.291 s, with a minimum
+  modeled separation of 0.028582 m against the 0.030 m margin. It held and then
+  resumed; the tracking stop occurred more than six seconds after the final
+  collision rejection. Therefore collision handling did not terminate the run.
+- The launcher recorded 1,861 rows at 89.937 Hz with zero IK failures, then
+  returned both arms to rest successfully. Do not raise the feedback threshold
+  or the duration cap to force a longer run. First isolate gain by retaining
+  0.60 translation response and reducing rotation response for the next test,
+  or otherwise diagnose the wrist control dynamics.
+
+### 2026-08-14 — Milestone 21: split 60% translation / 45% rotation staged
+
+- To isolate the physical wrist-tracking failure without giving up the desired
+  Cartesian response, both Behind arms now use `translation_scale: 0.60` and
+  `rotation_scale: 0.45`. The per-clutch reach limits remain 0.070 m / 0.16 rad;
+  the 0.08 rad time-aligned feedback stop, 30 mm collision margin, 60 s duration
+  cap, and every other safety gate remain unchanged.
+- This split profile is experimental and requires a Quest-driven MuJoCo check
+  before a supervised physical run. A clean run at or below the existing 60 s
+  cap is required before considering a 120 s reliability run.
+- Offline verification: the focused dual-safety suite passed 52 tests in both
+  environments; the full `.venv` and no-arm `.venv-arm18` suites each passed
+  236 tests; the no-contact dual preflight and `git diff --check` passed. No arm
+  controller was contacted.
+
+### 2026-08-14 — Milestone 22: marker-cap release exposed load recoil
+
+- The two newest runs have different causes. Run
+  `20260814-165124_dual-behind-60pct-marker-validation-01` used 0.60/0.60 gains
+  and stopped after 21.617 s because sequential driver sends were measured
+  10.432 ms apart against the unchanged 10 ms skew gate. Its 1,905 saved rows
+  show no collision, no tracking fault, and no dual engagement; both arms
+  returned to rest. The skew exception occurs before the current telemetry log
+  call, so its faulting send is present only in terminal output and is a
+  telemetry gap to fix before tuning the gate.
+- Run `20260814-165215_dual-behind-60pct-marker-validation-01` used the staged
+  0.60 translation / 0.45 rotation gains. It recorded 3,577 rows over 40.008 s
+  at 89.381 Hz, with 1,215 both-engaged rows and zero IK failures. A 114-row
+  collision episode from 31.134–32.391 s reached 20.730 mm separation against
+  the 30 mm margin and automatically recovered. Collision recovery exposed a
+  separate smoothness problem: the first clear left command advanced joint 5
+  by 0.089995 rad, followed by 0.077589 rad, because the normal high-rate
+  limiter resumes from its reset state. Add an explicit collision-recovery
+  ramp; do not weaken clearance.
+- The physical marker cap released at the final event. Both grips and triggers
+  remained fully pressed. The outgoing commands were still smooth (about
+  0.003 rad maximum change per fresh-feedback interval), but stored external
+  load released and encoder motion jumped by 0.0626 rad on left joint 4 and
+  0.0347 rad on right joint 3. Left time-aligned joint-4 error then crossed the
+  unchanged hard stop at 0.082283 rad; right joint 3 reached 0.067969 rad. The
+  fresh interpolated reference rules out a stale reference, and the command
+  evidence rules out a controller-command jerk. The Quest video visually
+  aligns the recoil with the telemetry stop.
+- The launcher returned the left side to rest. Right shutdown was not fully
+  confirmed because the right gripper did not reach its rest position, and the
+  launcher emitted the emergency power-cut warning. Require a supervised
+  read-only rest check before another motion run.
+- The most direct remedy is a coordinated soft load/tension guard below the
+  existing 0.08 rad hard fault: after a persistent roughly 0.045–0.050 rad
+  time-aligned error, stop advancing teleoperation, zero feedforward, yield
+  both targets toward fresh measured positions, and require grip release and
+  re-grip/re-anchor before motion resumes. This should unload stored position
+  error before a tight object releases. Exact threshold, persistence, measured-
+  pose collision screening, and transition shaping require offline tests and
+  MuJoCo validation before hardware use. No such control change is implemented
+  yet, and the 0.08 hard stop must remain.
+- The newest Quest recording was copied without deleting its headset original
+  to `/home/apurv/Desktop/marker-cap.mp4`. It is a valid 59.144 s, 1024x1024
+  HEVC/AAC MP4 (28,301,262 bytes); headset and local MD5 both equal
+  `524366de4045927d8fd3d6be8d592eca`.
+
+### 2026-08-14 — Milestone 23: load-aware recovery implemented at 60%/60%
+
+- At the owner's request, both Behind arms again use 0.60 translation and 0.60
+  rotation response. Reach remains 0.070 m / 0.16 rad. The 0.08 rad hard
+  feedback stop, 30 mm cross-arm clearance, 10 ms send-skew gate, and 60 s
+  duration cap are unchanged.
+- `SoftLoadGuard` acts below the hard stop only after three fresh feedback rows
+  at or above 0.045 rad time-aligned error. It drops both clutch anchors, stops
+  advancing task targets, zeros velocity feedforward, and moves each command
+  toward that arm's latest measured joints by at most 0.006 rad per tick. The
+  combined state is collision-screened before commit. Both grips must be
+  released and subsequently re-gripped; normal control then makes a zero-delta
+  re-anchor rather than catching up to hand motion made during the yield.
+- A cross-arm/environment rejection still holds both last accepted commands.
+  Once the raw controller proposal is clear, recovery commands are additionally
+  limited to 0.010 rad per joint and 0.001 m gripper motion per tick, re-screened
+  in the combined scene, and sent with zero feedforward until shaping catches
+  the live proposal. This closes the observed 0.089995/0.077589 rad collision-
+  exit jump without weakening the 30 mm margin.
+- Each physical driver call now records its own blocking send duration. A skew
+  over 10 ms is retained in the faulting telemetry row before the unchanged
+  fail-closed exception is raised, so the next event can distinguish a slow
+  left call, slow right call, and scheduler gap before any gate tuning.
+- Verification completed without contacting either arm: the focused dual
+  safety/hardware suite passed 62 tests, and the full suite passed 240 tests in
+  both `.venv` and `.venv-arm18`. The no-contact preflight accepted both saved
+  measurements/calibrations and all static gates; `git diff --check` and Python
+  compilation also passed.
+- A five-second tabletop MuJoCo construction smoke completed at
+  `runs/2026-08-14/20260814-172257_dual-60pct-load-guard-integration-smoke` with
+  the new strict telemetry schema and no rejection. Quest WebXR was not sending
+  packets during that initial smoke.
+- The subsequent Quest-driven tabletop run
+  `runs/2026-08-14/20260814-172640_dual-60pct-load-guard-mujoco-01` saved 3,732
+  rows with 2,111 normal, 1,070 collision-hold, and 551 collision-recovery
+  states. Both arms' largest command step on every recovery row was exactly the
+  configured 0.010 rad cap. The operator reported that recovery felt smooth.
+  This accepts the controller-driven collision ramp in MuJoCo, but MuJoCo does
+  not reproduce the cap-release impulse or hardware tracking error needed to
+  exercise the soft-load transition.
+- A fresh supervised read-only hardware preflight then reached both arms at
+  `.2`/`.3`, confirmed driver 1.8.6 and firmware 1.8.3, passed all static paths,
+  and found both arms near rest with grippers at 0.003453/0.007138 m. Position
+  mode was not enabled and no command was sent. Physical acceptance of the
+  60%/60% response and load-yield behavior remains pending.
+
+### 2026-08-14 — Milestone 24: measured-feedback load yield rejected and removed
+
+- Physical run
+  `runs/2026-08-14/20260814-173146_dual-60pct-load-guard-physical-01`
+  saved 5,325 rows over 59.996 s at 88.755 Hz. The soft guard triggered once
+  when left zero-based joint 4 reached 0.052184 rad. It then issued 125
+  `load_yield` rows over 1.360 s. The operator reported that both arms shook
+  strongly for roughly one to two seconds and then settled.
+- Telemetry confirms that the experimental response, not collision recovery,
+  caused the shaking. During measured-pose yield, every left/right joint
+  reversed command direction 16–32 times while each step remained capped at
+  0.006 rad. This is a delayed-feedback chasing loop: each newly measured pose
+  was already behind the command/physical response, so continuously replacing
+  the target produced oscillation. Peak errors were 0.072888 rad left and
+  0.057501 rad right, below the unchanged 0.08 rad hard gate, explaining why
+  the arms oscillated and settled rather than faulting immediately.
+- The same run had 39 collision-hold rows and three bounded recovery rows
+  before the load event. Those recovery transitions did not coincide with the
+  reported oscillation. The collision ramp and its 0.010 rad/tick cap are
+  therefore retained, along with individual driver-send duration telemetry.
+- The owner explicitly requested reversal. `SoftLoadGuard`, its dynamic
+  measured-pose command path, grip release/re-grip state machine, configuration,
+  telemetry fields, and tests are removed. No dormant config switch can
+  accidentally re-enable it. The 60%/60% staged gains, 0.08 rad hard tracking
+  stop, 30 mm collision margin, 10 ms send-skew gate, and 60 s cap remain.
+- Post-rollback verification passed: focused dual safety/hardware tests
+  `59 passed`; full `.venv` and `.venv-arm18` suites each `237 passed`; Python
+  compilation and `git diff --check` passed. A post-run read-only preflight
+  found both arms near rest and passed all gates; position mode was not enabled
+  and no command was sent.
+- Do not repeat the tight-cap benchmark with the present controller. A future
+  load response should use a fixed latched target or a fail-closed soft stop,
+  never a target continuously updated from delayed encoder measurements. Model
+  feedback delay and mechanical recoil before any new physical test.
+- The latest Quest recording was copied without deleting its headset original
+  from `com.oculus.browser-20260814-174931-0.mp4` to
+  `/home/apurv/Desktop/quest-latest-20260814-174931.mp4`. It is a valid 65.944 s,
+  1024x1024 HEVC/AAC MP4 (31,766,031 bytes); headset and local MD5 both equal
+  `63b5245403c09558ef1425c32b425411`.
+
+### 2026-08-14 — Milestone 25: Mirrored front/back sign re-opened
+
+- The operator clarified the Wizard-of-Oz requirement: remote operation from
+  another room is ordinary remote teleoperation when participants know a human
+  is controlling the robot; it is Wizard-of-Oz only when the hidden human is
+  intentionally standing in for apparent autonomy during an experiment.
+- Physical run
+  `runs/2026-08-14/20260814-175752_dual-mirrored-45pct-post-rollback-01`
+  completed 4,049 rows over 44.991 s at 89.996 Hz, including 2,766 both-engaged
+  rows. It had zero IK failures, control faults, collision holds, or rejections;
+  maximum left/right tracking errors were 0.007872/0.013752 rad, maximum send
+  skew was 1.121 ms, and each driver's blocking-send maximum was about 1.14 ms.
+- The clean dynamics do not accept the semantic direction. The operator reports
+  that swapped assignment, lateral/vertical translation, and rotations are
+  correct, but moving a hand forward toward the robot drives the end effector
+  away from the front-standing operator instead of robot-forward toward them.
+- Both current Mirrored calibrations explicitly use
+  `task_position_signs: [-1, -1, +1]`. An empirical regression through the real
+  transport path confirms physical hand-forward versus robot-X correlations of
+  -0.93 (arm `.2`) and -0.95 (arm `.3`). This is the first translation sign,
+  not a tracking, collision, controller-assignment, or gain problem.
+- No mapping was changed during diagnosis. The narrow candidate is
+  `[+1, -1, +1]` for both Mirrored calibrations, leaving lateral/vertical
+  directions, all rotation signs, 45% gains, reach, and every safety gate
+  unchanged. Do not overwrite the historically accepted calibration files;
+  create explicit candidates and require Quest-driven MuJoCo axis validation
+  before any physical run.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
 2. Measure transport RTT/clock offset and repeated controller/encoder reversal
    events before claiming physical p95/p99 latency.
-3. Preserve Left/Mirror at its accepted 45% scope and both Behind mappings at
-   40%; validate each separately before any promotion to 50%.
+3. Preserve Left/Mirror at its accepted 45% scope. Behind mapping is accepted
+   at 40%; its staged 60% translation / 60% rotation response remains a
+   benchmark profile, not a generally accepted scope. The rejected dynamic
+   load-yield path must stay removed.
 4. The dual-arm architecture in `docs/DUAL_ARM_EXTENSION.md` is implemented:
    bimanual WebXR packet, combined MuJoCo scene, per-arm runtime, coordinated
    controller, dual telemetry, and three launchers, with offline tests. The
    measured 500 mm aligned base transforms are recorded, both individual home
    cycles passed, the two Behind mappings are physically accepted at 40%, and
-   front-facing Mirrored is accepted at 45%. Dual gripper behavior and longer
-   representative reliability remain pending.
+   front-facing Mirrored tracks cleanly at 45% but its front/back sign is
+   re-opened. Dual gripper behavior and longer representative reliability
+   remain pending.
 5. Two-arm driver output still requires accepted per-arm calibrations,
    measured bases, all safety gates, explicit current authorization, and the
    dual token `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`. The normal Behind
