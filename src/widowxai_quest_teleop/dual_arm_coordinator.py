@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -23,6 +23,7 @@ class CoordinatedTick:
     stream_lost: bool
     fault_reason: str = ""
     held_sides: tuple[str, ...] = field(default_factory=tuple)
+    control_state: str = "normal"
 
     @property
     def moving_sides(self) -> tuple[str, ...]:
@@ -57,6 +58,8 @@ class DualArmCoordinator:
         *,
         coordinated_fault_hold: bool = True,
         cross_arm_collision: bool = True,
+        collision_recovery_max_joint_delta_rad: np.ndarray | None = None,
+        collision_recovery_max_gripper_delta_m: float = 0.001,
     ) -> None:
         missing = [side for side in DUAL_ARM_SIDES if side not in arms]
         if missing:
@@ -68,6 +71,19 @@ class DualArmCoordinator:
         self.collision_model = collision_model
         self.coordinated_fault_hold = bool(coordinated_fault_hold)
         self.cross_arm_collision = bool(cross_arm_collision)
+        recovery_delta = (
+            np.full(6, 0.010)
+            if collision_recovery_max_joint_delta_rad is None
+            else np.asarray(collision_recovery_max_joint_delta_rad, dtype=float).reshape(6)
+        )
+        if not np.all(np.isfinite(recovery_delta)) or np.any(recovery_delta <= 0.0):
+            raise ValueError("collision recovery joint deltas must be finite and positive")
+        recovery_gripper_delta = float(collision_recovery_max_gripper_delta_m)
+        if not np.isfinite(recovery_gripper_delta) or recovery_gripper_delta <= 0.0:
+            raise ValueError("collision recovery gripper delta must be finite and positive")
+        self.collision_recovery_max_joint_delta_rad = recovery_delta.copy()
+        self.collision_recovery_max_gripper_delta_m = recovery_gripper_delta
+        self.collision_recovery_active = False
         self.rejected_ticks = 0
         self.stream_loss_ticks = 0
         self.last_reconnect_generation: int | None = None
@@ -128,7 +144,13 @@ class DualArmCoordinator:
         )
 
         if external_fault:
-            return self._reject(proposals, CollisionReport(colliding=False), stream_lost, external_fault, held_sides)
+            return self._reject(
+                proposals,
+                CollisionReport(colliding=False),
+                stream_lost,
+                external_fault,
+                held_sides,
+            )
 
         report = CollisionReport(colliding=False)
         if self.cross_arm_collision:
@@ -137,22 +159,88 @@ class DualArmCoordinator:
                 {side: proposals[side].gripper_command_m for side in DUAL_ARM_SIDES},
             )
         if report.colliding:
+            self.collision_recovery_active = True
             return self._reject(
                 proposals,
                 report,
                 stream_lost,
                 f"combined scene rejects the commanded state: {report.describe()}",
                 held_sides,
+                control_state="collision_hold",
             )
 
+        control_state = "normal"
+        bounded_override = False
+        recovery_complete = True
+        if self.collision_recovery_active:
+            control_state = "collision_recovery"
+            bounded: dict[str, ArmProposal] = {}
+            for side in DUAL_ARM_SIDES:
+                arm = self.arms[side]
+                proposal = proposals[side]
+                q_delta = np.clip(
+                    proposal.q_command - arm.q_command,
+                    -self.collision_recovery_max_joint_delta_rad,
+                    self.collision_recovery_max_joint_delta_rad,
+                )
+                gripper_delta = float(
+                    np.clip(
+                        proposal.gripper_command_m - arm.gripper_command_m,
+                        -self.collision_recovery_max_gripper_delta_m,
+                        self.collision_recovery_max_gripper_delta_m,
+                    )
+                )
+                q_command = arm.q_command + q_delta
+                gripper_command = arm.gripper_command_m + gripper_delta
+                side_complete = np.allclose(
+                    q_command, proposal.q_command, rtol=0.0, atol=1e-12
+                ) and np.isclose(
+                    gripper_command,
+                    proposal.gripper_command_m,
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+                recovery_complete = recovery_complete and bool(side_complete)
+                flags = list(proposal.limiter_flags)
+                if not side_complete:
+                    flags.append("collision_recovery")
+                bounded[side] = replace(
+                    proposal,
+                    q_command=q_command,
+                    gripper_command_m=gripper_command,
+                    feedforward_velocity=np.zeros(6),
+                    limiter_flags=flags,
+                )
+            proposals = bounded
+            bounded_override = True
+            report = self.collision_model.check(
+                {side: proposals[side].q_command for side in DUAL_ARM_SIDES},
+                {side: proposals[side].gripper_command_m for side in DUAL_ARM_SIDES},
+            )
+            if report.colliding:
+                return self._reject(
+                    proposals,
+                    report,
+                    stream_lost,
+                    f"combined scene rejects collision recovery: {report.describe()}",
+                    held_sides,
+                    control_state="collision_hold",
+                )
+
         for side in DUAL_ARM_SIDES:
-            self.arms[side].commit(proposals[side])
+            if bounded_override:
+                self.arms[side].commit_bounded_override(proposals[side])
+            else:
+                self.arms[side].commit(proposals[side])
+        if bounded_override and recovery_complete:
+            self.collision_recovery_active = False
         return CoordinatedTick(
             proposals=proposals,
             collision=report,
             accepted=True,
             stream_lost=stream_lost,
             held_sides=held_sides,
+            control_state=control_state,
         )
 
     def _reject(
@@ -162,6 +250,8 @@ class DualArmCoordinator:
         stream_lost: bool,
         reason: str,
         held_sides: tuple[str, ...],
+        *,
+        control_state: str = "fault_hold",
     ) -> CoordinatedTick:
         self.rejected_ticks += 1
         for arm in self.arms.values():
@@ -173,6 +263,7 @@ class DualArmCoordinator:
             stream_lost=stream_lost,
             fault_reason=reason,
             held_sides=tuple(DUAL_ARM_SIDES) if self.coordinated_fault_hold else held_sides,
+            control_state=control_state,
         )
 
     def hold_all(self) -> None:
@@ -219,5 +310,12 @@ def build_dual_arm_system(
         collision_model,
         coordinated_fault_hold=bool(safety.get("coordinated_fault_hold", True)),
         cross_arm_collision=bool(safety.get("cross_arm_collision", True)),
+        collision_recovery_max_joint_delta_rad=np.asarray(
+            safety.get("collision_recovery_max_joint_delta_rad", [0.010] * 6),
+            dtype=float,
+        ),
+        collision_recovery_max_gripper_delta_m=float(
+            safety.get("collision_recovery_max_gripper_delta_m", 0.001)
+        ),
     )
     return arms, collision_model, coordinator

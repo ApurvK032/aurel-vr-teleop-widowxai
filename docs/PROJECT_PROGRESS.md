@@ -1,6 +1,6 @@
 # Project progress and measured performance
 
-Last updated: 2026-08-12
+Last updated: 2026-08-14
 
 This is the short operational ledger. `AGENTS.md` retains the complete history,
 safety rules, failure analysis, and exact milestone chronology. Raw run evidence
@@ -21,10 +21,14 @@ stays under `runs/`; compact publishable metrics stay under `results/`.
 | Right-arm home cycle | Physical pass | `.3` alone completed rest → home → rest; 0.359 mm resting model artifact cleared by 0.2% without deepening; maximum home error 0.008738 rad, final rest error 0.012016 rad | Does not validate signed teleoperation, gripper motion, or coordinated dual motion |
 | Right/Behind mapping on arm `.3` | Operator-accepted at 40% | 4,043 rows/44.987 s at 89.849 Hz; 3,705 active rows, full 0.442–40.036 mm physical gripper range, zero IK failures/arm limiter flags; max joint tracking error 0.010144 rad; operator confirmed correct directions and intended behavior | Does not accept 45%/50% gains, the left-hand mapping, or simultaneous dual motion |
 | First simultaneous physical dual run | Technical and signed-direction pass | 4,045 rows/44.996 s at 89.874 Hz; both arms active together for 3,786 rows; zero IK/limiter/fault/collision-rejection rows; max tracking error 0.010517 rad; send skew 0.754 ms p95 / 4.336 ms max; operator confirmed both arms worked perfectly in every direction | Triggers were intentionally unused; shutdown was not separately confirmed |
-| Front-facing Mirrored dual run | Technical and operator pass at 45% | 4,039 rows/44.990 s at 89.752 Hz; both arms active together for 3,229 rows; swapped controller assignment worked; zero IK/fault/hold/collision-rejection rows; max tracking error 0.016873 rad; operator reported perfect behavior | Triggers were intentionally unused; formal Quest-driven Mirrored MuJoCo pass and shutdown report remain pending |
+| Behind 60% response | Physical tracking failure; not accepted | Requested 120 s was capped to 60 s, but the run stopped at 20.681 s when left wrist joint 4 reached 0.081099 rad tracking error against the unchanged 0.08 stop; right simultaneously reached 0.075754 rad; both arms returned to rest | Do not raise the threshold or duration cap; isolate rotation gain from translation gain before retrying |
+| Behind 60%/60% follow-up | Command-skew stop; not accepted | 1,905 rows/21.617 s; terminal measured 10.432 ms sequential send skew against the 10 ms gate; no collision or feedback fault in saved rows; both arms returned to rest | Faulting skew is not saved because the exception precedes telemetry logging; instrument per-arm driver-send duration before tuning |
+| Behind 60% translation / 45% rotation marker-cap attempt | External-load release tracking stop; not accepted | 3,577 rows/40.008 s at 89.381 Hz; 1,215 both-engaged rows; zero IK failures; cap release produced encoder jumps with smooth outgoing commands, then left joint 4 reached 0.082283 rad error; collision hold had recovered earlier | Keep the 0.08 hard stop. Any softer response must avoid continuously chasing delayed measured positions; right gripper rest was not confirmed on shutdown |
+| 60%/60% measured-feedback load-yield experiment | Physically rejected and removed | The 5,325-row run triggered once at 0.052184 rad, then spent 125 rows/1.360 s chasing delayed encoder positions. Every joint reversed command direction 16–32 times; peak error reached 0.072888 rad left and 0.057501 rad right. The operator reported both arms shaking strongly before settling | Dynamic measured-pose yield is removed from config and live control. Bounded collision recovery and per-driver send timing remain; hard 0.08 rad stop, 30 mm clearance, and 10 ms skew gate are unchanged |
+| Front-facing Mirrored dual run | Technically clean at 45%; front/back direction rejected | Latest full run: 4,049 rows/44.991 s at 89.996 Hz, 2,766 both-engaged rows, zero IK/fault/hold/collision rows, 0.007872/0.013752 rad left/right maximum error, and 1.121 ms maximum send skew. Assignment, lateral/vertical motion, and rotations felt correct | Both calibrations use position signs `[-1,-1,+1]`; telemetry confirms hand-forward drives robot `−X` with −0.93/−0.95 correlation. Test candidate `[+1,-1,+1]` in MuJoCo before physical reuse |
 | Three-camera Quest operator view | Operator-accepted | One D455 plus two D405 feeds at 640×480×30 FPS; measured rates 29.97, 30.02, and 30.00 FPS | Glass-to-glass latency and three-stream impact on active WebXR pose rate remain unmeasured |
 | Camera UI | Operator-accepted | Persistent serial-based Scene/Left wrist/Right wrist assignment; adaptive 1/2/3-panel world anchor; B-button focus cycle; 380 ms transitions; common +0.18 m vertical offset | Camera loss currently warns but does not force robot hold |
-| Offline regression suite | Passing | 235 tests in `.venv` and 235 in `.venv-arm18`; the clean-PYTHONPATH direct dual-launch regression and `git diff --check` pass | Offline tests cannot authorize or validate physical motion |
+| Offline regression suite | Passing after load-yield rollback | 237 tests in `.venv` and 237 in `.venv-arm18`; the focused collision-recovery, send-duration, telemetry, and dual-safety suite passes 59 tests; post-run read-only preflight and `git diff --check` pass | Offline tests do not make another tight-object release safe; a replacement response needs a delayed-feedback test model before physical use |
 
 ## Camera milestone details
 
@@ -129,6 +133,21 @@ Known camera limitations:
     had zero faults, holds, IK failures, collision rows, or rejected proposals.
     Left/Mirror is now accepted at that exact scope; both triggers remained
     unused, so dual grippers remain separate.
+22. A Behind marker-task run at 60% exercised both triggers and reached the
+    collision margin 75 times; the coordinated hold recovered normally. At
+    20.681 s, both wrist joint-4 errors rose and the left crossed the unchanged
+    0.08 rad feedback stop. The reference was fresh/interpolated, so this is a
+    real 60%-scope tracking problem rather than the historical stale-reference
+    hypothesis. Both arms returned to rest.
+23. The 60% translation / 45% rotation marker-cap run proved that reducing
+    rotation gain alone does not address a tight-object release. The video and
+    telemetry align: commands remained smooth while both measured arms recoiled,
+    after which left joint 4 crossed the hard tracking gate.
+24. The first dynamic load-yield response was physically rejected. It followed
+    each new delayed encoder sample at up to 0.006 rad/tick, causing repeated
+    target reversals for 1.36 s. That path is removed. A future solution must
+    use a latched target or a fail-closed soft stop rather than a live
+    command-to-measurement chasing loop.
 
 ## Remaining validation work
 
@@ -145,9 +164,9 @@ Known camera limitations:
    is stale.
 6. Measure three-camera glass-to-glass latency and Quest pose-rate impact during
    an active bimanual WebXR session.
-7. Run the formal Quest-driven Mirrored MuJoCo pass retained in issue #2. This
-   is documentation/validation closure; physical assignment and mapping are
-   already accepted at 45%.
+7. Create a Mirrored calibration candidate that changes only the front/back
+   translation sign from `-1` to `+1`, then verify all axes in Quest-driven
+   MuJoCo before another physical Mirrored run.
 8. Fix the bimanual wrist-calibration arming UX and add in-VR calibration,
    clutch, and reach-limit status.
 
@@ -160,11 +179,10 @@ implementation and evidence are ahead of their tracker state:
   unchanged 0.08 rad stop remained active and the worst observed maximum was
   0.016873 rad. Treat as provisionally healthy, not closed, until a longer
   representative run passes.
-- **#2 Mirrored/front-facing mode:** functionally resolved at 45%. The swapped
-  hand assignment, left mapping, and performance were operator-accepted in a
-  clean physical run. Only the formal Quest-driven Mirrored MuJoCo record and
-  optional future gain work remain; the non-unified position/rotation signs are
-  documented as an intentional operator convention.
+- **#2 Mirrored/front-facing mode:** partially resolved at 45%. The swapped
+  hand assignment, lateral/vertical translation, rotations, and tracking are
+  clean, but the 2026-08-14 re-test rejected front/back direction. The current
+  first translation sign is `-1`; a `+1` candidate needs MuJoCo validation.
 - **#3 camera operator view:** core feature implemented and operator-accepted
   with one D455 and two D405 roles, independent camera transport, dropdowns,
   toggles, overview/focus cycling, and world-anchored transitions. Remaining
@@ -177,10 +195,12 @@ implementation and evidence are ahead of their tracker state:
 
 ## Recommended next milestone
 
-Behind at 40% and front-facing Mirrored at 45% are technically clean and
-operator-accepted. The next smallest physical test is a short dual-trigger run
-in separated workspaces with explicit shutdown confirmation, followed by a
-longer representative run to build evidence against recurrence of issue #1.
+Behind at 40% remains the accepted dual scope. Do not repeat the physical
+Mirrored test until its front/back candidate passes MuJoCo, and do not repeat
+the tight marker-cap benchmark yet. The unstable soft load-yield is
+removed; bounded collision recovery and per-arm send-duration telemetry remain
+with every hard gate unchanged. Design and test a latched soft stop against a
+delayed-feedback simulation before considering another loaded-release test.
 
 ## Change-control state
 

@@ -3,8 +3,11 @@
 This document defines a safe path to two arms without duplicating two
 single-arm processes and hoping they remain synchronized.
 
-> **Current status: implemented; Behind accepted at 40% and front-facing
-> Mirrored accepted at 45%.**
+> **Current status: implemented; Behind mapping accepted at 40% with response
+> staged at 60% translation / 60% rotation and bounded collision recovery for
+> validation. Front-facing Mirrored tracks cleanly at 45%, but its newly
+> re-checked front/back direction is rejected pending a one-axis sign correction.
+> The unstable dynamic measured-feedback load yield is removed.**
 >
 > The bimanual transport, dual-arm configuration schema, combined MuJoCo scene,
 > per-arm runtime, coordinated controller, dual telemetry, and all three
@@ -16,8 +19,9 @@ single-arm processes and hoping they remain synchronized.
 > 2. Left/Behind and Right/Behind are physically accepted at 40%, so
 >    `require_live_dual_arm_config` accepts the normal profile without the
 >    unvalidated-calibration override;
-> 3. dual grippers and longer-duration reliability remain to be validated; the
->    formal Quest-driven Mirrored MuJoCo record remains documentation closure.
+> 3. correct only the Mirrored front/back translation sign and pass a
+>    Quest-driven MuJoCo check before another physical Mirrored run;
+> 4. dual grippers and longer-duration reliability remain to be validated.
 >
 > Base geometry is no longer a blocker. On 2026-08-12 the owner measured the
 > bases exactly 500 mm apart, aligned in X and Z, at equal height, parallel with

@@ -1,9 +1,11 @@
 # Dual-arm bimanual profile for an operator standing IN FRONT of the arms.
 #
-# STATUS: physically accepted for front-facing bimanual motion at the exact
-# 0.45 settings below. Both stored calibrations are accepted, so this profile
-# no longer needs the temporary unvalidated-calibration override. Explicit
-# current authorization, the dual live token, and all safety gates still apply.
+# STATUS: the 0.45 profile tracks cleanly and its swapped controller assignment,
+# lateral/vertical motion, and rotations are operator-accepted. The 2026-08-14
+# re-test supersedes the earlier all-direction claim: front/back currently has
+# the wrong sign. Do not use this profile for another physical test until a
+# corrected candidate passes MuJoCo. Explicit current authorization, the dual
+# live token, and all safety gates still apply.
 #
 # This profile does not replace configs/dual_widowxai.yaml. That file is the
 # operator's working Behind/Parallel setup and stays untouched.
