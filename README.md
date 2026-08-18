@@ -180,6 +180,25 @@ configuration snapshot. Override them with `--table-width-m`,
 bench changes. An arm/table contact is a coordinated collision rejection, not
 just a visual overlap.
 
+To reproduce the previously rejected load-yield oscillation without exposing
+the physical arms, run the same scene with the explicit simulation-only stress
+flag:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/run_dual_sim.py \
+  --config configs/dual_widowxai.yaml \
+  --tabletop --inline-viewer --jerk-stress \
+  --label dual-jerk-stress-mujoco
+```
+
+This adds a 35 ms command delay, a 30 ms first-order response, 50 Hz encoder
+samples, and the historical three-sample 0.045 rad dynamic measured-pose
+yield. Hold both grips and make a fast but controlled controller reversal to
+stress it. If the guard activates, release both grips and re-grip to re-arm.
+The mode is intentionally expected to oscillate; it is a failure-reproduction
+tool, not a proposed fix. The flag is accepted only by the MuJoCo launcher and
+is never enabled by the normal simulation or either hardware launcher.
+
 No-motion preflight, including simultaneous and one-arm-moving path screening
 in the combined scene:
 
@@ -213,6 +232,25 @@ not convert candidate evidence into acceptance.
 
 Architecture, staged validation, and the definition of done are in
 [`docs/DUAL_ARM_EXTENSION.md`](docs/DUAL_ARM_EXTENSION.md).
+
+## Arm-to-arm leader/follower
+
+`scripts/leader_follower.py` is the small Trossen-driver path for using the
+physical right arm (`192.168.1.3`) as the leader and the physical left arm
+(`192.168.1.2`) as the follower:
+
+```bash
+env -u PYTHONPATH .venv-arm18/bin/python scripts/leader_follower.py \
+  --duration 3600
+```
+
+This is Trossen's official seven-axis position/velocity-copy and 0.1-gain force
+feedback pattern with the bench IPs and a one-hour default duration. It returns
+both arms to home and rest on exit and requires the operator to support the
+right leader when external-effort mode begins. This minimal path does not use
+Quest input, the project's combined collision checker, or its detailed tracking
+telemetry; use it only with separated workspaces and an operator ready to stop
+the run.
 
 ## Repository map
 

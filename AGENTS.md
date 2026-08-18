@@ -1652,6 +1652,130 @@ changing another variable.
   create explicit candidates and require Quest-driven MuJoCo axis validation
   before any physical run.
 
+### 2026-08-17 — Milestone 26: minimal right-leader / left-follower path exercised
+
+- Trossen's current software setup was checked: the supported Python path is
+  the `trossen-arm` package, and the official teleoperation demo makes a leader
+  backdrivable with external-effort mode while copying its positions and
+  velocities to a position-controlled follower.
+- `scripts/leader_follower.py` now retains the actual vendor demo behavior for
+  this bench: physical right `.3` uses `wxai_v0_leader`, physical left `.2`
+  uses `wxai_v0_follower`, all seven positions and velocities are copied, and
+  follower external effort is reflected to the leader at gain 0.1.
+- The script moves both arms to the same Trossen home pose, starts the official
+  external-effort/position loop, then returns both arms to home and rest before
+  cleanup. It contains no Quest dependency. Its default duration is 3,600 s;
+  Ctrl-C invokes the same cleanup path early.
+- A 15 s physical run on 2026-08-17 connected both controllers with driver
+  1.8.6 / firmware 1.8.3, completed the copy loop with no driver exception, and
+  completed the home/rest cleanup with exit code 0. Operator confirmation of
+  the physical following feel is still required; a clean process exit alone
+  does not prove motion quality.
+- This is intentionally the simple vendor-style path. It bypasses the
+  project's combined 30 mm collision screen, 0.08 rad time-aligned tracking
+  stop, and telemetry logger, and it provides no force feedback. Use it only in
+  separated workspaces under direct supervision. Do not present this run as a
+  validation of collision handling or tight bimanual tasks.
+
+### 2026-08-17 — Milestone 27: rejected load-yield isolated as a MuJoCo stress mode
+
+- At the owner's request, the failed 2026-08-14 controller was reconstructed
+  for failure reproduction only. `scripts/run_dual_sim.py --jerk-stress`
+  explicitly attaches it at runtime; the normal coordinator builder, normal
+  MuJoCo path, `run_dual_hardware.py`, and `run_hardware.py` never enable or
+  import the experimental controller.
+- The reconstructed guard uses the recorded physical settings: three fresh
+  50 Hz samples at or above 0.045 rad, a moving latest-measured-pose destination
+  bounded to 0.006 rad per tick, zero feedforward, and both-grip release then
+  re-grip before re-arming. It is deliberately the unstable design, not the
+  future remedy.
+- A synthetic encoder plant adds 35 ms command delay and a 30 ms first-order
+  response. MuJoCo displays that delayed joint state instead of immediately
+  copying commands, allowing fast Quest motion to develop the tracking error
+  that the original simulator could not represent. This is a timing/actuation
+  approximation; it does not model the marker cap's contact, friction, stored
+  elastic energy, or release impulse.
+- Stress telemetry records the guard phase, consecutive high-error samples,
+  maximum error, simulated delay, simulated time constant, time-aligned
+  references, and feedback errors. The usual strict dual telemetry remains in
+  force.
+- Offline verification passed 57 focused tests. Tests prove the delayed plant
+  does not teleport to a new command, the exact three-sample release/re-grip
+  state machine works, the configured delayed loop produces at least three
+  meaningful command-direction reversals, and the ordinary dual builder leaves
+  the rejected controller absent. The full suite passes 242 tests. A one-second
+  tabletop construction smoke wrote strict telemetry to
+  `runs/2026-08-17/20260817-135958_dual-jerk-stress-construction-smoke`; no Quest
+  packet was present, so manual Quest-driven MuJoCo stress acceptance remains
+  pending.
+- Never add `--jerk-stress` or its controller to a hardware launcher. Its only
+  purpose is to reproduce and measure the known failure before designing a
+  fixed-latch or fail-closed replacement.
+- Manual run `20260817-144524_dual-jerk-stress-manual-01` recorded 7,596 rows
+  over 84.447 s with zero IK failures or collision rejections. The old guard
+  did activate six times, beginning at 39.848 s, and occupied 3,655 rows / 44.6
+  s in `load_yield`. Trigger errors were 0.049707–0.070001 rad. Five episodes
+  were released and re-gripped; the sixth remained in wait-for-regrip at exit.
+  Thus the software trigger/freeze/re-arm path worked even though the operator
+  did not perceive violent shaking.
+- That run rejects the claim that the current plant is physically faithful.
+  Each activation produced only zero to two direction reversals per joint at
+  or above 0.001 rad and no joint traversed more than 0.024 rad during one
+  episode. The rejected physical run produced 10–31 reversals per joint above
+  0.001 rad and 0.051–0.278 rad joint spans in only 1.360 s. The synthetic
+  delayed first-order response is therefore too strongly damped; it represents
+  lag and guard activation but not loaded release, motor-loop dynamics, or the
+  observed shake intensity.
+- Manual run `20260817-144708_dual-jerk-stress-manual-01` recorded 3,616 rows
+  over 40.157 s with zero IK failures. It never armed the load guard because
+  the left grip remained released for the whole run: there were zero rows with
+  both grips pressed, zero `load_yield` rows, and the persistence counter
+  remained zero despite a 0.138340 rad peak right-arm simulated error. The
+  right-arm motion generated 12 combined collision rejections and 141 bounded
+  recovery rows; the unsafe proposed state reached -5.951 mm signed separation,
+  but the coordinated checker rejected it rather than committing it.
+- Do not tune the rejected controller to force a visual failure. The next
+  simulation step should keep that controller fixed and improve only the plant:
+  replay the measured cap-release recoil or add an explicitly underdamped/load-
+  release model, then compare its joint spans and meaningful reversal counts
+  against the 2026-08-14 physical trace.
+
+### 2026-08-18 — Milestone 28: noisy physical runs traced to workstation I/O collapse
+
+- Five consecutive Behind 60%/60% physical launches used byte-identical config
+  snapshots. The MuJoCo-only jerk controller was absent, every run had zero IK
+  failures, and no mapping or gain changed between them.
+- The first short run, `20260818-132103_dual-behind-60pct-45s-01`, occurred
+  before all camera streams were active and remained healthy at 90.06 Hz with
+  no Quest sequence gaps. Median/p95 send skew was 0.457/0.814 ms.
+- After the three-view camera service was configured, the next four loops fell
+  to 79.49, 73.31, 66.09, and 74.11 Hz. They skipped 344, 657, 844, and 218
+  Quest sequence intervals respectively. P95 per-driver sends rose from the
+  earlier roughly 0.75 ms baseline to roughly 2.1–2.8 ms, with individual
+  calls reaching 18.585 ms and loop stalls reaching 152.771 ms.
+- Run `20260818-133248_dual-behind-60pct-45s-01` stopped on a genuine measured
+  11.751 ms dual-send skew against the unchanged 10 ms gate. The other runs had
+  no collision or IK explanation for the operator-reported noise. Tracking
+  error remained below the 0.08 rad hard stop; irregular command timing and
+  dropped latest-state frames are the dominant software evidence.
+- Kernel evidence independently confirms workstation I/O instability. The
+  USB-C dock enumerated its RTL8153 arm-Ethernet adapter and a D405 at 13:16,
+  then logged UCSI failures, camera/hub disconnects, and repeated `Cannot
+  enable. Maybe the USB cable is bad?` errors from 13:23–13:27. At 13:43 the
+  Quest, Bridgesil dock, RTL8153 Ethernet, both dock-side D405s, and direct D455
+  all disconnected. The camera service was concurrently encoding three 30 Hz
+  feeds and later retained failed FFmpeg children.
+- After the collapse, `ip route get 192.168.1.2/.3` incorrectly selected
+  eduroam Wi-Fi through `10.131.255.254`; both arms were unreachable and no
+  Ethernet interface or external USB device remained enumerated. Do not launch
+  physical control in this state.
+- This is a hardware/topology and scheduling problem, not evidence that the
+  accepted calibration became noisy. Before another arm run, power-cycle or
+  replace the dock/cable and require the arm route to use the dedicated
+  Ethernet interface. First repeat a short camera-free relay run; then add
+  camera feeds one at a time while measuring loop rate, Quest gaps, driver read
+  and send duration. Prefer separating arm Ethernet from the camera dock.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
@@ -1660,7 +1784,8 @@ changing another variable.
 3. Preserve Left/Mirror at its accepted 45% scope. Behind mapping is accepted
    at 40%; its staged 60% translation / 60% rotation response remains a
    benchmark profile, not a generally accepted scope. The rejected dynamic
-   load-yield path must stay removed.
+   load-yield path must stay removed from physical control; its isolated
+   MuJoCo-only failure reproducer must remain behind `--jerk-stress`.
 4. The dual-arm architecture in `docs/DUAL_ARM_EXTENSION.md` is implemented:
    bimanual WebXR packet, combined MuJoCo scene, per-arm runtime, coordinated
    controller, dual telemetry, and three launchers, with offline tests. The

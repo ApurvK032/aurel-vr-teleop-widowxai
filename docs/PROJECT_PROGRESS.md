@@ -148,6 +148,12 @@ Known camera limitations:
     target reversals for 1.36 s. That path is removed. A future solution must
     use a latched target or a fail-closed soft stop rather than a live
     command-to-measurement chasing loop.
+25. The rejected controller is now available only through
+    `run_dual_sim.py --jerk-stress`, together with a 35 ms command-delay / 30 ms
+    first-order encoder model and 50 Hz feedback. Focused tests reproduce its
+    moving-target direction reversal and prove the normal builder leaves it
+    disabled. This is a failure-reproduction harness, not a hardware fix, and
+    a Quest-driven manual stress run is still pending.
 
 ## Remaining validation work
 
@@ -197,10 +203,12 @@ implementation and evidence are ahead of their tracker state:
 
 Behind at 40% remains the accepted dual scope. Do not repeat the physical
 Mirrored test until its front/back candidate passes MuJoCo, and do not repeat
-the tight marker-cap benchmark yet. The unstable soft load-yield is
-removed; bounded collision recovery and per-arm send-duration telemetry remain
-with every hard gate unchanged. Design and test a latched soft stop against a
-delayed-feedback simulation before considering another loaded-release test.
+the tight marker-cap benchmark yet. The unstable soft load-yield remains
+removed from physical control; bounded collision recovery and per-arm
+send-duration telemetry remain with every hard gate unchanged. Use its isolated
+`--jerk-stress` reproduction in MuJoCo to capture an oscillation trace, then
+design and compare a latched soft stop against exactly the same delayed-feedback
+case before considering another loaded-release test.
 
 ## Change-control state
 

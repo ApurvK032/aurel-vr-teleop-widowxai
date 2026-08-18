@@ -20,6 +20,7 @@ from widowxai_quest_teleop.motion_limiter import (
     configured_minimum_command_interval,
     minimum_command_spacing_wait,
 )
+from widowxai_quest_teleop.safety import TimeAlignedCommandHistory
 from widowxai_quest_teleop.telemetry import DUAL_ARM_TELEMETRY_COLUMNS, TelemetryLogger
 from widowxai_quest_teleop.transport import BimanualQuestReceiver
 from widowxai_quest_teleop.viewer import close_passive_viewer
@@ -156,6 +157,14 @@ def main() -> None:
         action="store_true",
         help="add the partially measured collidable tabletop to the dual-arm scene",
     )
+    parser.add_argument(
+        "--jerk-stress",
+        action="store_true",
+        help=(
+            "SIMULATION ONLY: add delayed encoder feedback and resurrect the "
+            "physically rejected dynamic measured-pose load yield"
+        ),
+    )
     parser.add_argument("--table-width-m", type=float, default=1.0)
     parser.add_argument("--table-depth-m", type=float, default=0.7)
     parser.add_argument("--table-thickness-m", type=float, default=0.04)
@@ -236,6 +245,53 @@ def main() -> None:
     )
     home_q = arms["left"].model.clamp_joints(home_q)
 
+    jerk_config = None
+    jerk_guard = None
+    feedback_plant = None
+    command_histories = None
+    feedback_reference = {side: home_q.copy() for side in DUAL_ARM_SIDES}
+    feedback_error = {side: np.zeros(6) for side in DUAL_ARM_SIDES}
+    feedback_reference_state = {side: "" for side in DUAL_ARM_SIDES}
+    feedback_sample_fresh = False
+    last_load_yield_phase = "monitoring"
+    if args.jerk_stress:
+        from widowxai_quest_teleop.jerk_stress_sim import (
+            DelayedEncoderPlant,
+            ExperimentalSoftLoadGuard,
+        )
+
+        jerk_config = config.get("simulation_jerk_stress")
+        if not isinstance(jerk_config, dict) or jerk_config.get("simulation_only") is not True:
+            raise SystemExit(
+                "--jerk-stress requires an explicit simulation-only configuration block"
+            )
+        jerk_guard = ExperimentalSoftLoadGuard(
+            threshold_rad=float(jerk_config["load_error_threshold_rad"]),
+            consecutive_samples=int(jerk_config["load_error_consecutive_samples"]),
+            max_yield_delta_rad=float(
+                jerk_config["load_yield_max_joint_delta_rad"]
+            ),
+            grip_threshold=float(jerk_config["grip_threshold"]),
+        )
+        coordinator.enable_simulation_jerk_stress(jerk_guard)
+        feedback_plant = DelayedEncoderPlant(
+            {side: home_q for side in DUAL_ARM_SIDES},
+            command_delay_s=float(jerk_config["command_delay_s"]),
+            response_time_constant_s=float(
+                jerk_config["response_time_constant_s"]
+            ),
+        )
+        config["_simulation_jerk_stress"] = {
+            "enabled_by_cli": True,
+            "warning": "reconstructs physically rejected dynamic measured-pose yield",
+            **jerk_config,
+        }
+        print(
+            "JERK STRESS — SIMULATION ONLY: delayed encoders are active and the "
+            "rejected moving measured-pose load yield is armed. This is expected "
+            "to shake after a sufficiently fast controller motion."
+        )
+
     start_report = collision_model.check(
         {side: home_q for side in DUAL_ARM_SIDES},
         {side: gripper_open for side in DUAL_ARM_SIDES},
@@ -290,13 +346,39 @@ def main() -> None:
     next_tick_s = started
     last_command_send_s = started
     mailbox_generation = 0
+    last_plant_update_s = started
+    next_feedback_s = started
+    if args.jerk_stress:
+        feedback_plant.append_command(
+            started, {side: arms[side].q_command for side in DUAL_ARM_SIDES}
+        )
+        tracking_delay = float(jerk_config["feedback_tracking_delay_s"])
+        command_histories = {
+            side: TimeAlignedCommandHistory(
+                arms[side].q_command, started, tracking_delay
+            )
+            for side in DUAL_ARM_SIDES
+        }
+        feedback_period_s = 1.0 / float(jerk_config["feedback_rate_hz"])
+    telemetry_columns = list(DUAL_ARM_TELEMETRY_COLUMNS)
+    if args.jerk_stress:
+        telemetry_columns.extend(
+            [
+                "experimental_load_yield_enabled",
+                "load_yield_phase",
+                "load_yield_consecutive_high_samples",
+                "load_yield_max_error_rad",
+                "simulated_command_delay_s",
+                "simulated_response_time_constant_s",
+            ]
+        )
 
     try:
         with TelemetryLogger(
             args.label,
             config,
             config["telemetry"]["output_dir"],
-            columns=DUAL_ARM_TELEMETRY_COLUMNS,
+            columns=telemetry_columns,
             ik_status_columns=tuple(f"{side}_ik_status" for side in DUAL_ARM_SIDES),
             strict_columns=True,
         ) as telemetry:
@@ -322,11 +404,55 @@ def main() -> None:
                     limiter_elapsed_s = max(limiter_elapsed_s, minimum_command_interval_s)
                 limiter_dt = bounded_command_period(limiter_elapsed_s, loop_hz)
 
-                tick = coordinator.step(sample, limiter_dt=limiter_dt)
+                robot_q_source = None
+                if args.jerk_stress:
+                    plant_now_s = time.perf_counter()
+                    plant_dt_s = max(
+                        1e-6,
+                        min(plant_now_s - last_plant_update_s, 0.1),
+                    )
+                    robot_q_source = feedback_plant.advance(
+                        plant_now_s, plant_dt_s
+                    )
+                    last_plant_update_s = plant_now_s
+                    for side in DUAL_ARM_SIDES:
+                        arms[side].q_feedback = robot_q_source[side].copy()
+                    feedback_sample_fresh = plant_now_s >= next_feedback_s
+                    if feedback_sample_fresh:
+                        for side in DUAL_ARM_SIDES:
+                            feedback_reference[side] = command_histories[
+                                side
+                            ].reference_at(plant_now_s)
+                            feedback_error[side] = (
+                                robot_q_source[side] - feedback_reference[side]
+                            )
+                            feedback_reference_state[side] = command_histories[
+                                side
+                            ].clamp_state(plant_now_s)
+                        next_feedback_s = plant_now_s + feedback_period_s
+
+                tick = coordinator.step(
+                    sample,
+                    limiter_dt=limiter_dt,
+                    robot_q_source=robot_q_source,
+                    feedback_error_source=(
+                        feedback_error if args.jerk_stress else None
+                    ),
+                    feedback_sample_fresh=feedback_sample_fresh,
+                )
+                if args.jerk_stress:
+                    decision = coordinator.experimental_load_decision
+                    if decision is not None and decision.phase != last_load_yield_phase:
+                        print(
+                            "JERK STRESS state: "
+                            f"{last_load_yield_phase} -> {decision.phase}; "
+                            f"max error {decision.max_error_rad:.6f} rad"
+                        )
+                        last_load_yield_phase = decision.phase
 
                 if quest_synchronized and sample is None and not any(
                     proposal.active for proposal in tick.proposals.values()
-                ):
+                ) and tick.control_state == "normal":
                     continue
 
                 if quest_synchronized and command_spacing_stage == "before_send":
@@ -338,7 +464,14 @@ def main() -> None:
 
                 collision_model.set_viewer_qpos(
                     sim_data,
-                    {side: arms[side].q_command for side in DUAL_ARM_SIDES},
+                    {
+                        side: (
+                            arms[side].q_command
+                            if not args.jerk_stress
+                            else robot_q_source[side]
+                        )
+                        for side in DUAL_ARM_SIDES
+                    },
                     {side: arms[side].gripper_command_m for side in DUAL_ARM_SIDES},
                 )
                 send_ns_by_side = {}
@@ -346,25 +479,82 @@ def main() -> None:
                 for side in DUAL_ARM_SIDES:
                     send_ns_by_side[side] = time.perf_counter_ns()
                     send_epoch_ns_by_side[side] = time.time_ns()
-                    arms[side].q_feedback = sim_data.qpos[
-                        collision_model.arm_qpos_indices[side]
-                    ].copy()
+                    if not args.jerk_stress:
+                        arms[side].q_feedback = sim_data.qpos[
+                            collision_model.arm_qpos_indices[side]
+                        ].copy()
                     arms[side].gripper_feedback_m = arms[side].gripper_command_m
                 last_command_send_s = max(send_ns_by_side.values()) / 1e9
 
-                telemetry.log(
-                    **dual_arm_telemetry_record(
-                        tick,
-                        consume_ns=consume_ns,
-                        send_ns_by_side=send_ns_by_side,
-                        send_epoch_ns_by_side=send_epoch_ns_by_side,
-                        sample=sample,
-                        overwrite_count=receiver.mailbox.overwrite_count,
-                        pre_consume_wait_s=pre_consume_wait_s,
-                        pre_send_wait_s=pre_send_wait_s,
-                        arms=arms,
+                if args.jerk_stress:
+                    feedback_plant.append_command(
+                        last_command_send_s,
+                        {
+                            side: arms[side].q_command
+                            for side in DUAL_ARM_SIDES
+                        },
                     )
+                    for side in DUAL_ARM_SIDES:
+                        command_histories[side].append(
+                            send_ns_by_side[side] / 1e9,
+                            arms[side].q_command,
+                        )
+
+                record = dual_arm_telemetry_record(
+                    tick,
+                    consume_ns=consume_ns,
+                    send_ns_by_side=send_ns_by_side,
+                    send_epoch_ns_by_side=send_epoch_ns_by_side,
+                    sample=sample,
+                    overwrite_count=receiver.mailbox.overwrite_count,
+                    pre_consume_wait_s=pre_consume_wait_s,
+                    pre_send_wait_s=pre_send_wait_s,
+                    arms=arms,
                 )
+                if args.jerk_stress:
+                    decision = coordinator.experimental_load_decision
+                    for side in DUAL_ARM_SIDES:
+                        record[f"{side}_q_feedback_reference"] = feedback_reference[
+                            side
+                        ]
+                        record[f"{side}_q_feedback_error"] = feedback_error[side]
+                        record[f"{side}_feedback_sample_fresh"] = (
+                            feedback_sample_fresh
+                        )
+                        record[f"{side}_feedback_reference_state"] = (
+                            feedback_reference_state[side]
+                        )
+                        record[f"{side}_feedback_newest_command_age_ms"] = (
+                            time.perf_counter()
+                            - command_histories[side].newest_time_s
+                        ) * 1000.0
+                        record[f"{side}_feedback_history_span_ms"] = (
+                            command_histories[side].newest_time_s
+                            - command_histories[side].oldest_time_s
+                        ) * 1000.0
+                    record.update(
+                        {
+                            "experimental_load_yield_enabled": True,
+                            "load_yield_phase": (
+                                "monitoring" if decision is None else decision.phase
+                            ),
+                            "load_yield_consecutive_high_samples": (
+                                0
+                                if decision is None
+                                else decision.consecutive_high_samples
+                            ),
+                            "load_yield_max_error_rad": (
+                                0.0 if decision is None else decision.max_error_rad
+                            ),
+                            "simulated_command_delay_s": jerk_config[
+                                "command_delay_s"
+                            ],
+                            "simulated_response_time_constant_s": jerk_config[
+                                "response_time_constant_s"
+                            ],
+                        }
+                    )
+                telemetry.log(**record)
 
                 if viewer is not None:
                     viewer.sync()

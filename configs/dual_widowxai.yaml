@@ -93,6 +93,21 @@ safety:
   # is recorded and enforced, never assumed from single-loop ordering.
   max_command_skew_s: 0.010
 
+# Dormant unless scripts/run_dual_sim.py is launched with --jerk-stress.
+# These values intentionally reconstruct the measured-feedback controller that
+# shook both physical arms on 2026-08-14. No hardware launcher reads this
+# block, and it must never become a live-output option.
+simulation_jerk_stress:
+  simulation_only: true
+  feedback_rate_hz: 50
+  feedback_tracking_delay_s: 0.025
+  command_delay_s: 0.035
+  response_time_constant_s: 0.030
+  load_error_threshold_rad: 0.045
+  load_error_consecutive_samples: 3
+  load_yield_max_joint_delta_rad: 0.006
+  grip_threshold: 0.65
+
 control:
   command_path: limited_interpolated
   update_mode: quest_synchronized

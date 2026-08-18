@@ -84,6 +84,11 @@ class DualArmCoordinator:
         self.collision_recovery_max_joint_delta_rad = recovery_delta.copy()
         self.collision_recovery_max_gripper_delta_m = recovery_gripper_delta
         self.collision_recovery_active = False
+        # Deliberately absent unless run_dual_sim.py enables the rejected
+        # measured-feedback controller through --jerk-stress. Hardware and
+        # normal MuJoCo never construct this object from configuration.
+        self._experimental_load_guard: object | None = None
+        self.experimental_load_decision: object | None = None
         self.rejected_ticks = 0
         self.stream_loss_ticks = 0
         self.last_reconnect_generation: int | None = None
@@ -108,12 +113,26 @@ class DualArmCoordinator:
                 arm.force_reanchor()
         return changed
 
+    def enable_simulation_jerk_stress(self, guard: object) -> None:
+        """Attach the historically rejected load-yield controller for MuJoCo.
+
+        This is an explicit runtime call rather than a config-driven builder
+        option so no hardware launcher can accidentally resurrect it.
+        """
+
+        required = ("observe", "max_yield_delta_rad")
+        if any(not hasattr(guard, name) for name in required):
+            raise TypeError("simulation jerk-stress guard has the wrong interface")
+        self._experimental_load_guard = guard
+
     def step(
         self,
         sample: BimanualQuestSample | None,
         *,
         limiter_dt: float,
         robot_q_source: dict[str, object] | None = None,
+        feedback_error_source: dict[str, object] | None = None,
+        feedback_sample_fresh: bool = False,
         external_fault: str = "",
     ) -> CoordinatedTick:
         self.observe_reconnect(sample)
@@ -151,6 +170,39 @@ class DualArmCoordinator:
                 external_fault,
                 held_sides,
             )
+
+        if self._experimental_load_guard is not None:
+            if feedback_error_source is None:
+                raise ValueError(
+                    "simulation jerk stress requires delayed feedback errors"
+                )
+            grip_by_side = {
+                side: (
+                    0.0
+                    if proposals[side].sample is None
+                    else float(proposals[side].sample.grip)
+                )
+                for side in DUAL_ARM_SIDES
+            }
+            decision = self._experimental_load_guard.observe(
+                {
+                    side: np.asarray(feedback_error_source[side], dtype=float)
+                    for side in DUAL_ARM_SIDES
+                },
+                feedback_sample_fresh=bool(feedback_sample_fresh),
+                grip_by_side=grip_by_side,
+            )
+            self.experimental_load_decision = decision
+            if decision.triggered:
+                for arm in self.arms.values():
+                    arm.force_reanchor()
+            if decision.active:
+                return self._commit_experimental_load_yield(
+                    proposals,
+                    sources,
+                    stream_lost=stream_lost,
+                    phase=decision.phase,
+                )
 
         report = CollisionReport(colliding=False)
         if self.cross_arm_collision:
@@ -241,6 +293,72 @@ class DualArmCoordinator:
             stream_lost=stream_lost,
             held_sides=held_sides,
             control_state=control_state,
+        )
+
+    def _commit_experimental_load_yield(
+        self,
+        proposals: dict[str, ArmProposal],
+        feedback_by_side: dict[str, object],
+        *,
+        stream_lost: bool,
+        phase: str,
+    ) -> CoordinatedTick:
+        """Continuously chase the newest delayed measurement, on purpose.
+
+        This reproduces the 2026-08-14 physical failure. Do not reuse this
+        method as a recovery design: its moving destination is precisely what
+        created the repeated command-direction reversals.
+        """
+
+        bounded: dict[str, ArmProposal] = {}
+        max_delta = float(self._experimental_load_guard.max_yield_delta_rad)
+        for side in DUAL_ARM_SIDES:
+            arm = self.arms[side]
+            measured = np.asarray(
+                feedback_by_side.get(side, arm.q_feedback), dtype=float
+            ).reshape(6)
+            q_command = arm.q_command + np.clip(
+                measured - arm.q_command,
+                -max_delta,
+                max_delta,
+            )
+            flags = list(proposals[side].limiter_flags)
+            flags.append("experimental_dynamic_load_yield")
+            bounded[side] = replace(
+                proposals[side],
+                q_des=measured.copy(),
+                q_command=q_command,
+                gripper_des_m=arm.gripper_command_m,
+                gripper_command_m=arm.gripper_command_m,
+                feedforward_velocity=np.zeros(6),
+                active=False,
+                limiter_flags=flags,
+            )
+
+        report = self.collision_model.check(
+            {side: bounded[side].q_command for side in DUAL_ARM_SIDES},
+            {side: bounded[side].gripper_command_m for side in DUAL_ARM_SIDES},
+        )
+        if report.colliding:
+            return self._reject(
+                bounded,
+                report,
+                stream_lost,
+                f"combined scene rejects experimental load yield: {report.describe()}",
+                tuple(DUAL_ARM_SIDES),
+                control_state="load_yield_collision_hold",
+            )
+
+        for side in DUAL_ARM_SIDES:
+            self.arms[side].commit_bounded_override(bounded[side])
+        return CoordinatedTick(
+            proposals=bounded,
+            collision=report,
+            accepted=True,
+            stream_lost=stream_lost,
+            held_sides=tuple(DUAL_ARM_SIDES),
+            control_state="load_yield",
+            fault_reason=f"simulation-only rejected controller: {phase}",
         )
 
     def _reject(
