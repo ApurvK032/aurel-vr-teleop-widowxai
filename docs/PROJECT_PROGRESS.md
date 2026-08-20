@@ -1,6 +1,6 @@
 # Project progress and measured performance
 
-Last updated: 2026-08-14
+Last updated: 2026-08-19
 
 This is the short operational ledger. `AGENTS.md` retains the complete history,
 safety rules, failure analysis, and exact milestone chronology. Raw run evidence
@@ -17,6 +17,7 @@ stays under `runs/`; compact publishable metrics stay under `results/`.
 | Dual MuJoCo tabletop | Operator-accepted | 10,211 rows over 114.878 s at 88.877 Hz; zero IK failures; 218 deliberate cross-arm clearance rejections held both arms exactly | Does not validate drivers, encoders, measurement tolerances, or physical collision distance |
 | Dual-arm bench geometry | Measured | Bases exactly 500 mm apart, no X/Z offset, equal height, parallel with no yaw difference; both centers 50.8 mm (2 in) from the rear edge | Overall table width/depth/thickness and physical collision clearance remain unmeasured |
 | Dual-arm controllers | Coordinated physical pass; Behind directions accepted | Both use driver 1.8.6/firmware 1.8.3; they completed a simultaneous 44.996 s run with 4.336 ms maximum send skew and correct operator-observed response in every direction | Dual grippers, post-run rest confirmation, and longer reliability remain pending |
+| Camera/CAD leader to one WidowXAI | Guarded software integration complete | MuJoCo starts at all-zero rest with direct viewer E/R/Q control; five named M3T joints pass through raw locked-root/timestamp/jump watchdogs, per-packet adaptive circular smoothing, relative anchoring, mandatory pending-mapping single-joint isolation, kernel-polled physical hold-to-run, 10% scaling, ±2° physical home envelope, shaping, 50 Hz time-aligned feedback, telemetry, workstation/network preflight, and rest/home/rest hardware lifecycle | Five separate physical sign runs, physical deadman qualification, real visual drift/occlusion behavior, live ZED fusion, joint 5, and gripper are pending lab evidence |
 | Left-arm home cycle | Physical pass | `.2` alone completed rest → home → rest; maximum home error 0.009119 rad, final rest error 0.008202 rad, modeled separation 60 mm against 30 mm margin | Does not validate signed teleoperation, gripper motion, or coordinated dual motion |
 | Right-arm home cycle | Physical pass | `.3` alone completed rest → home → rest; 0.359 mm resting model artifact cleared by 0.2% without deepening; maximum home error 0.008738 rad, final rest error 0.012016 rad | Does not validate signed teleoperation, gripper motion, or coordinated dual motion |
 | Right/Behind mapping on arm `.3` | Operator-accepted at 40% | 4,043 rows/44.987 s at 89.849 Hz; 3,705 active rows, full 0.442–40.036 mm physical gripper range, zero IK failures/arm limiter flags; max joint tracking error 0.010144 rad; operator confirmed correct directions and intended behavior | Does not accept 45%/50% gains, the left-hand mapping, or simultaneous dual motion |
@@ -28,7 +29,7 @@ stays under `runs/`; compact publishable metrics stay under `results/`.
 | Front-facing Mirrored dual run | Technically clean at 45%; front/back direction rejected | Latest full run: 4,049 rows/44.991 s at 89.996 Hz, 2,766 both-engaged rows, zero IK/fault/hold/collision rows, 0.007872/0.013752 rad left/right maximum error, and 1.121 ms maximum send skew. Assignment, lateral/vertical motion, and rotations felt correct | Both calibrations use position signs `[-1,-1,+1]`; telemetry confirms hand-forward drives robot `−X` with −0.93/−0.95 correlation. Test candidate `[+1,-1,+1]` in MuJoCo before physical reuse |
 | Three-camera Quest operator view | Operator-accepted | One D455 plus two D405 feeds at 640×480×30 FPS; measured rates 29.97, 30.02, and 30.00 FPS | Glass-to-glass latency and three-stream impact on active WebXR pose rate remain unmeasured |
 | Camera UI | Operator-accepted | Persistent serial-based Scene/Left wrist/Right wrist assignment; adaptive 1/2/3-panel world anchor; B-button focus cycle; 380 ms transitions; common +0.18 m vertical offset | Camera loss currently warns but does not force robot hold |
-| Offline regression suite | Passing after load-yield rollback | 237 tests in `.venv` and 237 in `.venv-arm18`; the focused collision-recovery, send-duration, telemetry, and dual-safety suite passes 59 tests; post-run read-only preflight and `git diff --check` pass | Offline tests do not make another tight-object release safe; a replacement response needs a delayed-feedback test model before physical use |
+| Offline regression suite | Passing after CAD deadman and zero-rest MuJoCo audit | 288 tests in `.venv` and 288 in `.venv-arm18`; CAD filtering, raw-watchdog separation, wrap/reset behavior, live workstation route checks, pending-mapping single-joint isolation, kernel-polled hold-to-run faults, zero-rest simulation, viewer keys, and existing safety paths are covered | Offline tests do not accept CAD directions, physically qualify the selected deadman device, repair USB topology, or make another tight-object release safe |
 
 ## Camera milestone details
 
@@ -148,6 +149,12 @@ Known camera limitations:
     target reversals for 1.36 s. That path is removed. A future solution must
     use a latched target or a fail-closed soft stop rather than a live
     command-to-measurement chasing loop.
+25. The rejected controller is now available only through
+    `run_dual_sim.py --jerk-stress`, together with a 35 ms command-delay / 30 ms
+    first-order encoder model and 50 Hz feedback. Focused tests reproduce its
+    moving-target direction reversal and prove the normal builder leaves it
+    disabled. This is a failure-reproduction harness, not a hardware fix, and
+    a Quest-driven manual stress run is still pending.
 
 ## Remaining validation work
 
@@ -169,6 +176,10 @@ Known camera limitations:
    MuJoCo before another physical Mirrored run.
 8. Fix the bimanual wrist-calibration arming UX and add in-VR calibration,
    clutch, and reach-limit status.
+9. For the camera/CAD leader, run the stationary stream qualifier and exact
+   home-relative MuJoCo profile, then perform the 15-second isolated five-axis
+   physical sign commissioning. Keep joint 5 and gripper disabled and do not
+   expand the 10%/±2° profile until that evidence is accepted.
 
 ## GitHub issue audit
 
@@ -197,14 +208,16 @@ implementation and evidence are ahead of their tracker state:
 
 Behind at 40% remains the accepted dual scope. Do not repeat the physical
 Mirrored test until its front/back candidate passes MuJoCo, and do not repeat
-the tight marker-cap benchmark yet. The unstable soft load-yield is
-removed; bounded collision recovery and per-arm send-duration telemetry remain
-with every hard gate unchanged. Design and test a latched soft stop against a
-delayed-feedback simulation before considering another loaded-release test.
+the tight marker-cap benchmark yet. The unstable soft load-yield remains
+removed from physical control; bounded collision recovery and per-arm
+send-duration telemetry remain with every hard gate unchanged. Use its isolated
+`--jerk-stress` reproduction in MuJoCo to capture an oscillation trace, then
+design and compare a latched soft stop against exactly the same delayed-feedback
+case before considering another loaded-release test.
 
 ## Change-control state
 
-The current work is on local branch `dual-stabilization`. Camera, bimanual
+The current work is on local branch `bimanual-teleop-updated`. Camera, bimanual
 stabilization, documentation, and test changes are intentionally uncommitted
 and unpushed until the owner asks for publication. No physical robot command was
 sent during the camera and LAN milestones.

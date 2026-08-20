@@ -66,6 +66,12 @@ ik:
 hardware:
   enabled: true
   robot_ip: 192.168.1.2
+  workstation_preflight:
+    enabled: true
+    require_external_power: true
+    required_power_profile: performance
+    expected_robot_source_ip: 192.168.1.10
+    require_direct_route: true
   # Uses the already validated Step-3 full-stroke gripper lifecycle: leave the
   # closed gripper untouched during rest-to-home, open it separately at home,
   # then map trigger from 0.040 m open to 0.000 m closed.

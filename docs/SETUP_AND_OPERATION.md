@@ -204,8 +204,8 @@ env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 
 ### Configure the arm network
 
-The tested controller is `192.168.1.2`. Give the Ubuntu Ethernet interface an
-unused address on the same `/24` subnet, with no gateway on a dedicated link.
+The tested controller is `192.168.1.2`. Give the Ubuntu Ethernet interface the
+dedicated address `192.168.1.10/24`, with no gateway on that link.
 If the controller uses another address, copy the configuration, update
 `hardware.robot_ip`, and use the same address in the live confirmation token.
 
@@ -218,6 +218,9 @@ visibility.
 With the arm firmly mounted and supported:
 
 ```bash
+env -u PYTHONPATH .venv/bin/python scripts/check_workstation.py \
+  --config configs/quest_50pct_hardware.yaml
+
 env -u PYTHONPATH .venv-arm18/bin/python scripts/preflight_hardware.py \
   --config configs/quest_50pct_hardware.yaml
 ```
@@ -247,13 +250,15 @@ env -u PYTHONPATH .venv-arm18/bin/python scripts/run_hardware.py \
 
 The launcher:
 
-1. requires fresh Quest tracking with grip released;
-2. locks the selected hand and mapping before connecting;
-3. checks driver, firmware, feedback, joint limits, and the startup path;
-4. moves from all-zero rest to `[0, 60, 75, -60, 0, 0]` degrees;
-5. opens the gripper in a separate blocking move;
-6. enables grip-controlled relative teleoperation;
-7. returns the arm to all-zero rest after normal, Ctrl+C, and safety-stop exits.
+1. verifies AC power, `performance` mode, and a direct robot route from
+   `192.168.1.10` before constructing the hardware backend;
+2. requires fresh Quest tracking with grip released;
+3. locks the selected hand and mapping before connecting;
+4. checks driver, firmware, feedback, joint limits, and the startup path;
+5. moves from all-zero rest to `[0, 60, 75, -60, 0, 0]` degrees;
+6. opens the gripper in a separate blocking move;
+7. enables grip-controlled relative teleoperation;
+8. returns the arm to all-zero rest after normal, Ctrl+C, and safety-stop exits.
 
 The accepted profile can run without an internal deadline, but explicit short
 `--duration` values are recommended during development.
@@ -263,15 +268,41 @@ The accepted profile can run without an internal deadline, but explicit short
 The commands above operate one arm from one selected controller. Do not repeat
 them in two terminals to control two arms.
 
-The current Quest Hand and Behind/Mirrored controls are single-arm inputs. A
-correct dual-arm runtime must capture both controllers simultaneously, maintain
-independent calibration/IK/driver state, use a combined collision model, and
-coordinate all startup, fault, and shutdown behavior. No physical dual-arm
-command exists yet.
+The coordinated dual-arm runtime is implemented in
+`scripts/run_dual_hardware.py`: one bimanual Quest packet, independent
+calibration/IK/driver state, a combined collision model, coordinated hold, and
+rest/home/rest lifecycle. Both Behind mappings are accepted at 40%. The active
+60% response is a staged benchmark that failed tracking/skew tests and is not a
+generally accepted operating scope; dual grippers and longer reliability also
+remain pending.
 
-Follow [`DUAL_ARM_EXTENSION.md`](DUAL_ARM_EXTENSION.md) for the prerequisites,
-code touchpoints, proposed configuration, implementation phases, and validation
-gates.
+Run the read-only workstation and combined-model checks before a dry run:
+
+```bash
+env -u PYTHONPATH .venv/bin/python scripts/check_workstation.py \
+  --config configs/dual_widowxai.yaml
+env -u PYTHONPATH .venv/bin/python scripts/preflight_dual_hardware.py \
+  --config configs/dual_widowxai.yaml
+env -u PYTHONPATH .venv-arm18/bin/python scripts/run_dual_hardware.py \
+  --config configs/dual_widowxai.yaml \
+  --duration 15
+```
+
+The first command is expected to fail while either arm route uses Wi-Fi. Follow
+[`DUAL_ARM_EXTENSION.md`](DUAL_ARM_EXTENSION.md) for the live token, calibration
+and measured-base gates, staged validation, and exact physical checklist.
+
+## Camera/CAD leader input
+
+The five-joint M3T leader uses the same official Trossen backend and physical
+rest/home/rest lifecycle through a separate, bounded launcher. It does not use
+Quest IK and it cannot control unobserved WidowX joint 5 or the gripper. Follow
+the complete [CAD leader commissioning guide](CAD_LEADER_TELEOP.md) for the
+stationary stream gate, exact MuJoCo profile, dry run, CAD-specific live token,
+and five separate supervised ±2° physical sign tests. While signs remain
+pending, every live run requires one `--commission-joint 0…4` selection and
+holds all unselected follower joints at home. It also requires an explicit
+Linux evdev hold-to-run device; terminal `e/r` is disabled for live CAD motion.
 
 ## Calibration
 

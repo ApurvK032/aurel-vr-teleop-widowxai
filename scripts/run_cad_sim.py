@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
-import re
 import select
 import sys
 import time
-from pathlib import Path
+from dataclasses import replace
 
 import mujoco
 import numpy as np
@@ -15,103 +12,30 @@ import numpy as np
 from widowxai_quest_teleop.cad_input import (
     CadDeadmanController,
     CadFreshnessWatchdog,
+    CadJointFilter,
     CadRestMapper,
     CadSafetyError,
     CadUdpReceiver,
+    cad_commission_joint_index,
     rest_command_limits,
 )
-from widowxai_quest_teleop.config import load_config, resolve_project_path
+from widowxai_quest_teleop.config import load_config
 from widowxai_quest_teleop.hardware import CommandGate, HardwareSafetyError
 from widowxai_quest_teleop.model import WidowXAIModel
 from widowxai_quest_teleop.motion_limiter import limiter_from_config
+from widowxai_quest_teleop.telemetry import CAD_TELEMETRY_COLUMNS, TelemetryLogger
 from widowxai_quest_teleop.viewer import close_passive_viewer
 
 
-CAD_TELEMETRY_COLUMNS = (
-    "pc_epoch_ns",
-    "pc_monotonic_ns",
-    "cad_sequence",
-    "cad_source_time_ns",
-    "cad_source_age_ms",
-    "cad_arrival_age_ms",
-    "cad_fresh",
-    "recovery_streak",
-    "discontinuity_generation",
-    "last_discontinuity",
-    "deadman_pressed",
-    "deadman_engaged",
-    "deadman_needs_release",
-    "reanchor_generation",
-    "q_source",
-    "q_des",
-    "q_cmd",
-    "q_feedback",
-    "limiter_flags",
-    "event",
-)
-
-
-def _encode(value):
-    if isinstance(value, np.ndarray):
-        return json.dumps(value.tolist(), separators=(",", ":"))
-    if isinstance(value, (list, tuple, dict)):
-        return json.dumps(value, separators=(",", ":"))
-    return value
-
-
-class CadTelemetryLogger:
-    def __init__(self, label: str, config: dict, output_dir: str | Path) -> None:
-        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-") or "cad-rest-sim"
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        day = time.strftime("%Y-%m-%d")
-        suffix = time.time_ns() % 1_000_000_000
-        self.run_dir = (
-            resolve_project_path(output_dir)
-            / day
-            / f"{stamp}-{suffix:09d}_{safe_label}"
-        )
-        self.run_dir.mkdir(parents=True, exist_ok=False)
-        self.csv_path = self.run_dir / "cad_telemetry.csv"
-        self._handle = self.csv_path.open("w", newline="", encoding="utf-8")
-        self._writer = csv.DictWriter(self._handle, fieldnames=CAD_TELEMETRY_COLUMNS)
-        self._writer.writeheader()
-        self.rows = 0
-        (self.run_dir / "config_snapshot.json").write_text(
-            json.dumps(config, indent=2, default=str), encoding="utf-8"
-        )
-
-    def log(self, **record) -> None:
-        self._writer.writerow(
-            {name: _encode(record.get(name, "")) for name in CAD_TELEMETRY_COLUMNS}
-        )
-        self.rows += 1
-
-    def close(self) -> None:
-        if self._handle.closed:
-            return
-        self._handle.flush()
-        self._handle.close()
-        (self.run_dir / "summary.json").write_text(
-            json.dumps(
-                {
-                    "rows": self.rows,
-                    "telemetry_csv": str(self.csv_path),
-                    "hardware_output": False,
-                    "start_and_end_pose": "rest",
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-
 class SimulationDeadmanConsole:
-    """Simulation-only latch used to exercise deadman/re-anchor semantics."""
+    """Simulation-only latch controlled from the terminal or MuJoCo window."""
 
     def __init__(self) -> None:
         self._pressed = False
         self._quit = False
         self._interactive = False
+        self.press_generation = 0
+        self.release_generation = 0
 
     @property
     def pressed(self) -> bool:
@@ -122,13 +46,32 @@ class SimulationDeadmanConsole:
         return self._quit
 
     def set_pressed(self, value: bool) -> None:
-        self._pressed = bool(value)
+        pressed = bool(value)
+        if pressed != self._pressed:
+            if pressed:
+                self.press_generation += 1
+            else:
+                self.release_generation += 1
+        self._pressed = pressed
 
     def start(self) -> None:
         if not sys.stdin.isatty():
             print("stdin is not interactive; simulation deadman remains released")
             return
         self._interactive = True
+
+    def handle_viewer_key(self, keycode: int) -> None:
+        """Handle GLFW letter keycodes delivered by MuJoCo's passive viewer."""
+
+        if keycode == ord("E"):
+            self.set_pressed(True)
+            print("SIM deadman ENGAGED from MuJoCo window; press R to release")
+        elif keycode == ord("R"):
+            self.set_pressed(False)
+            print("SIM deadman released from MuJoCo window")
+        elif keycode == ord("Q"):
+            self.set_pressed(False)
+            self._quit = True
 
     def poll(self) -> None:
         if not self._interactive:
@@ -138,13 +81,13 @@ class SimulationDeadmanConsole:
             return
         command = sys.stdin.readline().strip().lower()
         if command in ("e", "engage"):
-            self._pressed = True
+            self.set_pressed(True)
             print("SIM deadman ENGAGED; type 'r' + Enter to release")
         elif command in ("r", "release"):
-            self._pressed = False
+            self.set_pressed(False)
             print("SIM deadman released")
         elif command in ("q", "quit", ""):
-            self._pressed = False
+            self.set_pressed(False)
             self._quit = True
         else:
             print("simulation commands: e=engage, r=release, q=quit")
@@ -229,6 +172,12 @@ def main() -> None:
     parser.add_argument("--label", default="cad-rest-mujoco")
     parser.add_argument("--no-telemetry", action="store_true")
     parser.add_argument(
+        "--commission-joint",
+        type=int,
+        choices=range(5),
+        help="preview only one follower joint (0-4), matching physical sign commissioning",
+    )
+    parser.add_argument(
         "--simulation-auto-deadman",
         action="store_true",
         help=(
@@ -245,6 +194,10 @@ def main() -> None:
         raise SystemExit("CAD MuJoCo launcher cannot enable physical output")
     if not np.isfinite(args.duration) or args.duration < 0.0:
         raise SystemExit("--duration must be finite and nonnegative")
+    try:
+        commission_joint = cad_commission_joint_index(args.commission_joint)
+    except CadSafetyError as exc:
+        raise SystemExit(f"CAD COMMISSIONING SELECTION REJECTED: {exc}") from None
 
     model = WidowXAIModel(config["model"]["xml_path"])
     rest_q = np.asarray(config["model"]["rest_q_rad"], dtype=float).reshape(6)
@@ -265,6 +218,7 @@ def main() -> None:
         signs=np.asarray(config["cad"]["signs"], dtype=float),
         scales=np.asarray(config["cad"]["scales"], dtype=float),
         source_deadband_rad=np.asarray(config["cad"]["source_deadband_rad"], dtype=float),
+        commission_joint=commission_joint,
         command_limits=command_limits,
     )
     controller = CadDeadmanController(mapper)
@@ -272,6 +226,15 @@ def main() -> None:
         config["cad"]["stale_timeout_s"],
         config["cad"]["fresh_samples_to_recover"],
         np.asarray(config["cad"]["max_source_step_rad"], dtype=float),
+    )
+    source_filter_config = config["cad"]["source_filter"]
+    if source_filter_config.get("enabled") is not True:
+        raise SystemExit("CAD MuJoCo commissioning requires the source joint filter")
+    source_filter = CadJointFilter(
+        minimum_cutoff_hz=source_filter_config["minimum_cutoff_hz"],
+        speed_coefficient=source_filter_config["speed_coefficient"],
+        derivative_cutoff_hz=source_filter_config["derivative_cutoff_hz"],
+        maximum_cutoff_hz=source_filter_config["maximum_cutoff_hz"],
     )
 
     udp_host = args.udp_host or config["cad"]["udp_host"]
@@ -293,36 +256,61 @@ def main() -> None:
 
     sim_data = mujoco.MjData(model.model)
     model.set_viewer_qpos(sim_data, rest_q, gripper_q)
+    console = SimulationDeadmanConsole()
     viewer = None
     if not args.headless:
         from mujoco import viewer as mujoco_viewer
 
-        viewer = mujoco_viewer.launch_passive(model.model, sim_data)
+        viewer = mujoco_viewer.launch_passive(
+            model.model,
+            sim_data,
+            key_callback=console.handle_viewer_key,
+        )
         viewer.cam.lookat[:] = [0.25, 0.0, 0.18]
         viewer.cam.distance = 1.0
         viewer.cam.azimuth = 135
         viewer.cam.elevation = -20
 
-    console = SimulationDeadmanConsole()
     if not args.simulation_auto_deadman:
         console.start()
     print("PHYSICAL OUTPUT DISABLED: this process never imports or opens the Trossen driver")
     print(f"starting and ending at rest q={rest_q.tolist()}")
     print(f"listening for M3T joints on udp://{udp_host}:{udp_port}")
+    print(
+        "mapping selection: "
+        + (
+            "all five mapped joints"
+            if commission_joint is None
+            else (
+                f"ONLY follower joint {commission_joint} from "
+                f"{config['cad']['expected_names'][commission_joint]}"
+            )
+        )
+    )
     if args.simulation_auto_deadman:
         print("simulation auto-deadman will engage once after three fresh packets")
     else:
-        print("simulation commands: e + Enter=engage, r + Enter=release, q + Enter=quit")
+        print(
+            "simulation commands: click MuJoCo and press E/R/Q, or use "
+            "e/r/q + Enter in this terminal"
+        )
 
     telemetry = None
     if not args.no_telemetry:
-        telemetry = CadTelemetryLogger(
-            args.label, config, config["telemetry"]["output_dir"]
+        telemetry = TelemetryLogger(
+            args.label,
+            config,
+            config["telemetry"]["output_dir"],
+            columns=CAD_TELEMETRY_COLUMNS,
+            ik_status_columns=(),
+            strict_columns=True,
         )
 
     q_command = rest_q.copy()
     q_des = rest_q.copy()
     last_sample = None
+    last_filtered_sample = None
+    filter_generation = watchdog.discontinuity_generation
     loop_hz = float(config["control"]["loop_rate_hz"])
     period = 1.0 / loop_hz
     started = time.perf_counter()
@@ -347,6 +335,15 @@ def main() -> None:
                 freshness = watchdog.observe(sample, now_ns)
             else:
                 freshness = watchdog.poll(now_ns)
+            if freshness.discontinuity_generation != filter_generation:
+                source_filter.reset()
+                last_filtered_sample = None
+                filter_generation = freshness.discontinuity_generation
+            if sample is not None:
+                filtered_q = source_filter.update(
+                    sample.q, sample.arrival_monotonic_ns
+                )
+                last_filtered_sample = replace(sample, q=filtered_q)
 
             if args.simulation_auto_deadman:
                 if freshness.fresh and not auto_deadman_engaged:
@@ -360,7 +357,7 @@ def main() -> None:
                 target = controller.update(
                     deadman_pressed=deadman_pressed,
                     stream_fresh=freshness.fresh,
-                    sample=last_sample,
+                    sample=last_filtered_sample,
                     robot_q=q_command,
                 )
                 last_event = ""
@@ -417,6 +414,11 @@ def main() -> None:
                     cad_source_time_ns="" if last_sample is None else last_sample.source_time_ns,
                     cad_source_age_ms=source_age_ms,
                     cad_arrival_age_ms=arrival_age_ms,
+                    cad_root_locked=False if last_sample is None else last_sample.root_locked,
+                    receiver_packets=receiver.received_packets,
+                    receiver_valid_packets=receiver.valid_packets,
+                    receiver_invalid_packets=receiver.invalid_packets,
+                    receiver_last_error=receiver.last_error or "",
                     cad_fresh=freshness.fresh,
                     recovery_streak=freshness.recovery_streak,
                     discontinuity_generation=freshness.discontinuity_generation,
@@ -424,8 +426,23 @@ def main() -> None:
                     deadman_pressed=deadman_pressed,
                     deadman_engaged=controller.engaged,
                     deadman_needs_release=controller.needs_release,
+                    deadman_source="simulation_terminal_latch",
+                    deadman_device="",
+                    deadman_key_code="",
+                    deadman_state_age_ms=0.0,
+                    deadman_press_generation=console.press_generation,
+                    deadman_release_generation=console.release_generation,
                     reanchor_generation=mapper.reanchor_generation,
+                    commission_joint=""
+                    if commission_joint is None
+                    else commission_joint,
+                    hardware_live=False,
                     q_source="" if last_sample is None else last_sample.q,
+                    q_source_filtered=""
+                    if last_filtered_sample is None
+                    else last_filtered_sample.q,
+                    source_filter_alpha=source_filter.last_alpha,
+                    source_filter_cutoff_hz=source_filter.last_cutoff_hz,
                     q_des=q_des,
                     q_cmd=q_command,
                     q_feedback=sim_data.qpos[model.qpos_indices].copy(),
@@ -436,6 +453,7 @@ def main() -> None:
             if now - last_log >= 1.0:
                 print(
                     "CAD_SIM "
+                    f"commission_joint={commission_joint if commission_joint is not None else 'all'} "
                     f"recv/valid/invalid={receiver.received_packets}/"
                     f"{receiver.valid_packets}/{receiver.invalid_packets} "
                     f"fresh={int(freshness.fresh)} age_ms={freshness.age_s * 1000:.1f} "
@@ -461,7 +479,7 @@ def main() -> None:
         controller.update(
             deadman_pressed=False,
             stream_fresh=False,
-            sample=last_sample,
+            sample=last_filtered_sample,
             robot_q=q_command,
         )
         receiver.stop()

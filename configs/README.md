@@ -16,6 +16,8 @@ Current single-arm profile:
 - runs at the Quest cadence (nominally 90 Hz);
 - uses a 25 ms Trossen interpolation horizon and conservative velocity
   feedforward;
+- fails closed unless AC power, the `performance` profile, and the dedicated
+  direct robot-Ethernet route are present;
 - maps controller motion at 50% of the reference article scale;
 - enables the full 0–40 mm gripper stroke;
 - returns the arm to all-zero rest on exit.
@@ -69,7 +71,22 @@ without first testing it in MuJoCo.
 ## Specialized profiles
 
 - `six_axis_arm_diagnostic.yaml` drives a deterministic Quest-free diagnostic.
-- `cad_rest_commissioning.yaml` is an independent CAD/leader-arm experiment.
+- `cad_rest_commissioning.yaml` is the independent MuJoCo-only CAD/leader-arm
+  experiment.
+- `cad_home_commissioning_mujoco.yaml` retains its legacy filename but now
+  previews the guarded 10% mapping and ±2° simulation phase from all-zero
+  rest, matching the printed leader's requested initial visualization. The
+  physical profile keeps its separate rest-to-home lifecycle.
+- `cad_hardware_commissioning.yaml` is the guarded first physical CAD profile:
+  five tracked joints at 10% scale, ±2° about home, 15 seconds maximum, fixed
+  joint 5, disabled gripper, raw-stream watchdogs, adaptive source smoothing,
+  workstation/network preflight, and candidate signs that require the explicit
+  first-run acceptance flag. Pending live mapping additionally requires
+  `--commission-joint 0` through `4`; every unselected follower joint is held
+  exactly at home. Live output also requires an explicitly selected Linux
+  evdev hold-to-run device that is polled every control iteration; a missing,
+  held, unsupported, or disconnected device fails closed. Follow
+  `docs/CAD_LEADER_TELEOP.md`; do not expand this evidence profile in place.
 - `right_mirror_axis_validation_*`, `right_real_axis_validation_hardware.yaml`,
   and `temporary_*` preserve calibration experiments and are not normal run
   profiles.

@@ -62,6 +62,10 @@ from widowxai_quest_teleop.quest_power import prepare_tabletop_tracking
 from widowxai_quest_teleop.safety import TimeAlignedCommandHistory
 from widowxai_quest_teleop.telemetry import DUAL_ARM_TELEMETRY_COLUMNS, TelemetryLogger
 from widowxai_quest_teleop.transport import BimanualQuestReceiver
+from widowxai_quest_teleop.workstation import (
+    WorkstationSafetyError,
+    run_workstation_preflight,
+)
 
 GRIP_RELEASED = 0.65
 # A contact this shallow, at a pose the arm is physically resting in, is model
@@ -513,6 +517,19 @@ def main() -> None:
                 f"live dual-arm output remains disabled; pass --confirm-live {expected}. "
                 "A single-arm LIVE-WIDOWXAI-<ip> token never enables two arms."
             )
+        try:
+            workstation = run_workstation_preflight(
+                hardware,
+                [arms_config[side].robot_ip for side in DUAL_ARM_SIDES],
+            )
+        except WorkstationSafetyError as exc:
+            raise SystemExit(f"live workstation preflight failed: {exc}") from None
+        print(
+            "preflight: workstation "
+            f"AC={workstation.power_supply} profile={workstation.power_profile} "
+            f"robot_source={workstation.route_source_ip} "
+            f"devices={list(workstation.route_devices)}"
+        )
         variant = END_EFFECTOR_PROFILE_TO_VARIANT[str(end_effector_profile)]
         channels = {
             side: ArmChannel(
