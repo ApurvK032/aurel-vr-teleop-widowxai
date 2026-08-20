@@ -26,8 +26,9 @@ latency telemetry.
 | One physical WidowXAI on Ubuntu | Working |
 | Automatic rest → home → rest | Working |
 | Bimanual WebXR capture, dual-arm MuJoCo, coordinated runtime | Working |
-| Two-arm physical operation | Implemented, blocked pending per-arm calibration acceptance |
+| Two-arm physical operation | Behind accepted at 40%; staged 60% response is not accepted |
 | Configurable scene/left-wrist/right-wrist camera views | Operator-accepted with D455 + two D405s |
+| Five-joint camera/CAD leader to one WidowXAI | Guarded software path complete; physical sign commissioning pending |
 
 The current single-arm profile is
 [`configs/quest_50pct_hardware.yaml`](configs/quest_50pct_hardware.yaml).
@@ -136,6 +137,22 @@ Before enabling output:
 The full, copyable commands and lifecycle behavior are documented in
 [`docs/SETUP_AND_OPERATION.md`](docs/SETUP_AND_OPERATION.md#run-one-physical-widowxai).
 
+The independent M3T/CAD leader path now reuses the same proven Trossen backend
+and rest/home/rest safety lifecycle. Its first physical profile is limited to
+10% scale, ±2° about home, 15 seconds, five tracked joints, and no gripper. See
+the [CAD leader commissioning guide](docs/CAD_LEADER_TELEOP.md); the direction
+mapping remains pending until the next supervised lab session. A time-based
+speed-adaptive joint filter smooths visual jitter after the raw packet
+watchdog; it cannot conceal a stale stream, jump, or tracker restart. Pending
+live mapping is single-axis-only: `--commission-joint` is mandatory and all
+unselected follower joints remain at home. Live CAD motion also requires an
+explicit Linux evdev hold-to-run input; the terminal `e/r` latch is available
+only in MuJoCo and hardware dry runs.
+
+The MuJoCo-only CAD profile starts and returns to all-zero joint rest. Its
+viewer directly accepts `E` to engage, `R` to release/re-anchor, and `Q` to
+quit; these keys no longer have to be entered in the terminal.
+
 ## Results
 
 Large raw traces remain local under the ignored `runs/` directory. The
@@ -221,7 +238,10 @@ reach envelope, and 10 ms command-skew gate remain unchanged. Live mode still
 requires explicit current authorization, every independent safety gate, and
 its own
 `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>` token; the single-arm
-`LIVE-WIDOWXAI-<ip>` token can never enable two arms.
+`LIVE-WIDOWXAI-<ip>` token can never enable two arms. Before a hardware backend
+is constructed, every live launcher now also verifies AC power, the
+`performance` power profile, and a direct robot-Ethernet route sourced from
+`192.168.1.10`.
 
 Base transforms in `configs/dual_widowxai.yaml` record the measured 2026-08-12
 bench geometry: 500 mm separation, no forward/vertical offset, equal height,
@@ -274,6 +294,7 @@ known failure signatures, and recovery points for future development sessions.
 - [Configuration catalog](configs/README.md)
 - [Latency and results](results/README.md)
 - [Dual-arm extension](docs/DUAL_ARM_EXTENSION.md)
+- [Camera/CAD leader commissioning](docs/CAD_LEADER_TELEOP.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Acknowledgements

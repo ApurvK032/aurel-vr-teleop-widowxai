@@ -149,6 +149,12 @@ ik:
 hardware:
   enabled: true
   require_explicit_enable: true
+  workstation_preflight:
+    enabled: true
+    require_external_power: true
+    required_power_profile: performance
+    expected_robot_source_ip: 192.168.1.10
+    require_direct_route: true
   control_gripper: true
   end_effector_profile: legacy_1_8
   driver_package: trossen-arm

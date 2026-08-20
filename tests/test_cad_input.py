@@ -8,6 +8,7 @@ from widowxai_quest_teleop.cad_input import (
     CadDeadmanController,
     CadFreshnessWatchdog,
     CadInputError,
+    CadJointFilter,
     CadJointSample,
     CadRestMapper,
     CadSafetyError,
@@ -269,9 +270,81 @@ def test_commissioning_deadbands_preserve_isolated_joint_mapping() -> None:
         np.testing.assert_allclose(mapper.map(source), expected, atol=1e-12)
 
 
+def test_isolated_commissioning_joint_keeps_every_other_joint_at_home() -> None:
+    home = np.array([0.0, 1.0, 1.2, -1.0, 0.0, 0.0])
+    robot_anchor = home + np.array([0.01, 0.01, 0.005, -0.01, 0.01, 0.0])
+    mapper = CadRestMapper(
+        rest_q=home,
+        signs=np.ones(5),
+        scales=np.full(5, 0.10),
+        source_deadband_rad=np.zeros(5),
+        commission_joint=2,
+        command_limits=np.tile([-2.0, 2.0], (6, 1)),
+    )
+    engaged = mapper.engage(np.zeros(5), robot_anchor)
+    expected_anchor = home.copy()
+    expected_anchor[2] = robot_anchor[2]
+    np.testing.assert_array_equal(engaged, expected_anchor)
+
+    target = mapper.map(np.full(5, 0.20))
+    expected = home.copy()
+    expected[2] = robot_anchor[2] + 0.02
+    np.testing.assert_allclose(target, expected, atol=1e-12)
+
+    for invalid in (-1, 5, True, 1.5):
+        with pytest.raises(CadSafetyError, match="commission joint"):
+            CadRestMapper(
+                rest_q=home,
+                signs=np.ones(5),
+                scales=np.ones(5),
+                commission_joint=invalid,
+                command_limits=np.tile([-2.0, 2.0], (6, 1)),
+            )
+
+
 def test_angle_delta_uses_shortest_path_across_pi() -> None:
     result = wrapped_angle_delta(np.array([-np.pi + 0.01]), np.array([np.pi - 0.01]))
     np.testing.assert_allclose(result, [0.02], atol=1e-12)
+
+
+def test_cad_joint_filter_attenuates_jitter_and_opens_for_fast_motion() -> None:
+    joint_filter = CadJointFilter(
+        minimum_cutoff_hz=2.0,
+        speed_coefficient=4.0,
+        derivative_cutoff_hz=2.0,
+        maximum_cutoff_hz=20.0,
+    )
+    joint_filter.update(np.zeros(5), 1_000_000_000)
+    jittered = joint_filter.update(
+        np.array([0.01, -0.01, 0.0, 0.0, 0.0]), 1_040_000_000
+    )
+    assert np.max(np.abs(jittered)) < 0.01
+    stationary_alpha = joint_filter.last_alpha.copy()
+
+    moved = joint_filter.update(
+        np.array([0.13, -0.13, 0.0, 0.0, 0.0]), 1_080_000_000
+    )
+    assert joint_filter.last_alpha[0] > stationary_alpha[0]
+    assert moved[0] > jittered[0]
+    assert moved[1] < jittered[1]
+
+
+def test_cad_joint_filter_wraps_and_reset_does_not_create_a_pi_jump() -> None:
+    joint_filter = CadJointFilter(
+        minimum_cutoff_hz=2.0,
+        speed_coefficient=4.0,
+        derivative_cutoff_hz=2.0,
+        maximum_cutoff_hz=20.0,
+    )
+    first = np.full(5, np.pi - 0.01)
+    second = np.full(5, -np.pi + 0.01)
+    joint_filter.update(first, 1_000_000_000)
+    filtered = joint_filter.update(second, 1_040_000_000)
+    assert np.max(np.abs(wrapped_angle_delta(filtered, first))) < 0.02
+
+    reset = joint_filter.reset(np.full(5, 0.5), 2_000_000_000)
+    np.testing.assert_array_equal(reset, np.full(5, 0.5))
+    np.testing.assert_array_equal(joint_filter.last_alpha, np.ones(5))
 
 
 def test_all_zero_rest_is_valid_noncolliding_and_asymmetric(model) -> None:

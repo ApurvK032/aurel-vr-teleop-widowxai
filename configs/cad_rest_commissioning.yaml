@@ -30,6 +30,12 @@ cad:
   # CAD silhouettes are weak around the rotation axis. Deliberate isolated
   # tests must cross these thresholds slowly before the scale is increased.
   source_deadband_rad: [0.15, 0.02, 0.01, 0.025, 0.15]
+  source_filter:
+    enabled: true
+    minimum_cutoff_hz: 2.0
+    speed_coefficient: 4.0
+    derivative_cutoff_hz: 2.0
+    maximum_cutoff_hz: 20.0
 
 commissioning:
   # Two-degree global envelope around rest. J1 and J2 are at their official

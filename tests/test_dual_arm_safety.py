@@ -22,6 +22,7 @@ from widowxai_quest_teleop.dual_arm_model import (
     TabletopGeometry,
 )
 from widowxai_quest_teleop.telemetry import (
+    CAD_TELEMETRY_COLUMNS,
     DUAL_ARM_TELEMETRY_COLUMNS,
     TELEMETRY_COLUMNS,
     TelemetryLogger,
@@ -995,19 +996,19 @@ def test_undeclared_telemetry_column_raises_instead_of_being_dropped(tmp_path) -
 def test_every_launcher_logs_only_columns_its_schema_declares() -> None:
     """Guards against an arm's data being silently dropped by DictWriter.
 
-    scripts/run_cad_sim.py is a known, pre-existing exception: it passes 13
-    keys that TELEMETRY_COLUMNS never declared, so those have always been
-    discarded. It is listed here rather than fixed because changing the CAD
-    telemetry schema is a separate decision.
+    CAD, single-arm, and dual-arm launchers each have an explicit schema. A new
+    launcher must be assigned here rather than silently dropping source or
+    feedback evidence into the wrong schema.
     """
 
     import ast
     from pathlib import Path
 
     single = set(TELEMETRY_COLUMNS)
+    cad = set(CAD_TELEMETRY_COLUMNS)
     dual = set(DUAL_ARM_TELEMETRY_COLUMNS)
     dual_scripts = {"run_dual_sim.py", "run_dual_hardware.py"}
-    known_lossy = {"run_cad_sim.py"}
+    cad_scripts = {"run_cad_sim.py", "run_cad_hardware.py"}
 
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
     undeclared: dict[str, list[str]] = {}
@@ -1022,17 +1023,18 @@ def test_every_launcher_logs_only_columns_its_schema_declares() -> None:
             keys = {keyword.arg for keyword in node.keywords if keyword.arg}
             if not keys:
                 continue
-            declared = dual if path.name in dual_scripts else single
+            declared = (
+                dual
+                if path.name in dual_scripts
+                else cad
+                if path.name in cad_scripts
+                else single
+            )
             extra = sorted(keys - declared)
             if extra:
                 undeclared.setdefault(path.name, []).extend(extra)
 
-    assert set(undeclared) <= known_lossy, (
-        f"launcher logs columns no schema declares: "
-        f"{ {k: v for k, v in undeclared.items() if k not in known_lossy} }"
-    )
-    # The known exception must stay visible rather than quietly disappearing.
-    assert "run_cad_sim.py" in undeclared
+    assert not undeclared, f"launcher logs columns no schema declares: {undeclared}"
 
 
 def test_dual_telemetry_counts_ik_failures_from_both_arms(tmp_path) -> None:

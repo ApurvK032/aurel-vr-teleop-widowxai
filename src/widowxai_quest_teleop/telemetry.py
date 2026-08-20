@@ -73,6 +73,61 @@ TELEMETRY_COLUMNS = [
 ]
 
 
+# CAD input is joint-space state rather than a Quest pose.  Both CAD launchers
+# use this schema with strict column checking so input faults, physical
+# feedback, and the command sent to the arm remain on the same timeline.
+CAD_TELEMETRY_COLUMNS = [
+    "pc_epoch_ns",
+    "pc_monotonic_ns",
+    "cad_sequence",
+    "cad_source_time_ns",
+    "cad_source_age_ms",
+    "cad_arrival_age_ms",
+    "cad_root_locked",
+    "receiver_packets",
+    "receiver_valid_packets",
+    "receiver_invalid_packets",
+    "receiver_last_error",
+    "cad_fresh",
+    "recovery_streak",
+    "discontinuity_generation",
+    "last_discontinuity",
+    "deadman_pressed",
+    "deadman_engaged",
+    "deadman_needs_release",
+    "deadman_source",
+    "deadman_device",
+    "deadman_key_code",
+    "deadman_state_age_ms",
+    "deadman_press_generation",
+    "deadman_release_generation",
+    "reanchor_generation",
+    "commission_joint",
+    "hardware_live",
+    "command_send_monotonic_ns",
+    "command_send_epoch_ns",
+    "command_send_duration_ms",
+    "feedback_read_monotonic_ns",
+    "feedback_sample_fresh",
+    "feedback_reference_state",
+    "feedback_newest_command_age_ms",
+    "feedback_history_span_ms",
+    "q_source",
+    "q_source_filtered",
+    "source_filter_alpha",
+    "source_filter_cutoff_hz",
+    "q_des",
+    "q_cmd",
+    "q_feedback",
+    "q_feedback_reference",
+    "q_feedback_error",
+    "gripper_feedback_m",
+    "limiter_flags",
+    "event",
+    "fault_reason",
+]
+
+
 DUAL_ARM_SHARED_COLUMNS = [
     "pc_epoch_ns",
     "pc_monotonic_ns",
@@ -194,11 +249,10 @@ class TelemetryLogger:
         self.columns = list(TELEMETRY_COLUMNS if columns is None else columns)
         # DictWriter drops unknown keys silently, so a caller that logs a
         # column this logger does not declare loses the data without any error.
-        # The dual-arm path opts into failing loudly, because a dropped column
-        # there means a whole arm silently vanishing from the record. The
-        # single-arm default stays lenient: scripts/run_cad_sim.py already
-        # relies on passing extra keys, and tightening it would both break that
-        # launcher and change an evidence-bearing CSV schema.
+        # Safety-critical callers opt into failing loudly, because a dropped
+        # column can make a fault look like a clean run. The single-arm Quest
+        # default remains lenient for compatibility; CAD and dual-arm callers
+        # provide their own complete schemas and enable strict checking.
         self._strict_columns = bool(strict_columns)
         self._known_columns = set(self.columns)
         self._ik_status_columns = tuple(ik_status_columns)

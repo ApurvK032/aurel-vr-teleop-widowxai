@@ -754,13 +754,20 @@ baseline:
 
 ```text
 configs/cad_rest_commissioning.yaml
+configs/cad_home_commissioning_mujoco.yaml
+configs/cad_hardware_commissioning.yaml
+docs/CAD_LEADER_TELEOP.md
+scripts/check_cad_stream.py
+scripts/run_cad_hardware.py
 scripts/run_cad_sim.py
 src/widowxai_quest_teleop/cad_input.py
+tests/test_cad_hardware.py
 tests/test_cad_input.py
 ```
 
-Do not delete or merge them into the live Quest path without an explicit user
-decision.
+Do not delete them or merge their input path into the live Quest controller/IK
+path. The physical CAD launcher deliberately reuses only the proven hardware
+backend and rest/home/rest helpers.
 
 Right/Mirror at 50% is the current operator-accepted single-arm mapping. Preserve
 the tagged left Step-3 rollback and the historical rejected/working calibration
@@ -1765,6 +1772,15 @@ changing another variable.
   Quest, Bridgesil dock, RTL8153 Ethernet, both dock-side D405s, and direct D455
   all disconnected. The camera service was concurrently encoding three 30 Hz
   feeds and later retained failed FFmpeg children.
+- UPower history confirms the laptop was on battery for all five runs: charge
+  fell from 54% at the end of the clean 13:21 run to approximately 37% at the
+  start of the final 13:34 run, under roughly 19–30 W discharge. The system did
+  not enter its logged low-battery condition until 13:45 and was not connected
+  to AC until about 13:55. Battery operation may have reduced CPU/USB power
+  headroom and amplified the camera/dock problem, but it cannot be the sole
+  cause because the first battery-powered run sustained 90.06 Hz with zero
+  Quest gaps. Require AC power and the performance profile for future physical
+  comparisons, while still repairing/separating the unstable dock topology.
 - After the collapse, `ip route get 192.168.1.2/.3` incorrectly selected
   eduroam Wi-Fi through `10.131.255.254`; both arms were unreachable and no
   Ethernet interface or external USB device remained enumerated. Do not launch
@@ -1775,6 +1791,110 @@ changing another variable.
   Ethernet interface. First repeat a short camera-free relay run; then add
   camera feeds one at a time while measuring loop rate, Quest gaps, driver read
   and send duration. Prefer separating arm Ethernet from the camera dock.
+
+### 2026-08-19 — Milestone 29: guarded CAD-leader hardware path implemented offline
+
+- The five named M3T leader joints now have a separate physical commissioning
+  launcher using the proven Trossen 1.8.6 backend and all-zero rest → normal
+  home → relative control → all-zero rest lifecycle. The Quest transport,
+  calibration, mapping, and IK path is unchanged.
+- The first physical profile is capped at 15 seconds, 10% source scale, and ±2
+  degrees around home. WidowX joint 5 and the gripper remain fixed because the
+  CAD stream does not observe them. The five signs remain candidate evidence;
+  live output requires both the CAD-specific token and
+  `--accept-unvalidated-mapping` until an operator accepts them.
+- Physical preflight requires a fresh locked-root source before opening the
+  arm, an interactive terminal deadman, an arm measured within 0.08 rad of
+  all-zero rest, model/controller path checks, 25 ms interpolation, bounded
+  velocity and acceleration, 50 Hz time-aligned feedback, and the unchanged
+  0.08 rad hard tracking stop. Stale/restarted/jumping input holds and requires
+  release then re-engagement. Re-anchors use the last accepted command, never
+  delayed encoder feedback.
+- `check_cad_stream.py` qualifies a stationary session without importing or
+  contacting the robot. It reports rate, timestamp age, sequence loss,
+  discontinuities, invalid packets, per-joint step, and p95/max visual jitter
+  against the configured deadbands.
+- CAD telemetry now has a strict declared schema shared by simulation and
+  hardware, fixing the earlier 13-field silent-drop exception. It records
+  source lock/freshness, receiver errors, deadman state, commands, physical
+  feedback/reference/error, driver-send duration, and the faulting feedback
+  row.
+- A synthetic 60 Hz locked-root UDP stream passed the complete in-memory
+  rest/home/control/rest dry execution, the exact home-relative MuJoCo profile
+  passed headless, and the stationary stream qualifier passed. Full `.venv`
+  and no-arm `.venv-arm18` suites each pass 255 tests. No arm controller was
+  contacted and no physical command was sent.
+- Physical sign acceptance, real stationary/occlusion evidence, live ZED M3T
+  fusion, joint 5, and gripper tracking remain pending. Do not promote this to
+  full-range or unattended teleoperation from offline evidence alone.
+
+### 2026-08-19 — Milestone 30: source smoothing and live-workstation interlocks
+
+- The CAD path now filters five circular joint angles once per unique M3T
+  packet using monotonic arrival time and a speed-adaptive cutoff. Raw packets,
+  not filtered values, continue to drive timestamp, sequence, freshness, and
+  0.12 rad jump rejection. A discontinuity resets the filter and still requires
+  deadman release/re-engagement.
+- CAD telemetry records raw and filtered joint vectors plus filter alpha and
+  cutoff, so smoothing can be evaluated from evidence rather than feel alone.
+  The exact hardware and home-relative MuJoCo profiles share the same filter.
+- Every live Quest, dual-arm, and CAD launcher now verifies external AC power,
+  the `performance` power profile, and direct routes to all selected robot IPs
+  sourced from `192.168.1.10` before constructing a Trossen backend. This
+  directly blocks the Wi-Fi-gateway route observed after the dock collapse.
+- These are offline changes only. No camera or arm was opened. Filtering cannot
+  repair USB/dock collapse or low WebXR cadence; those conditions must still be
+  isolated with camera-free runs and feeds added one at a time.
+- Full `.venv` and no-arm `.venv-arm18` suites each pass 264 tests after this
+  audit.
+
+### 2026-08-19 — Milestone 31: pending CAD signs made single-axis-only
+
+- `run_cad_hardware.py` now accepts `--commission-joint 0..4`. When mapping
+  status is `candidate_pending_physical_validation`, live output rejects the
+  mapping override unless one joint is selected. The live token and every
+  existing gate remain independently required.
+- The isolated mapper commands every unselected tracked follower joint exactly
+  to normal home and keeps joint 5 fixed. Raw values from all five source
+  joints still pass through timestamp, root-lock, restart, jump, freshness, and
+  filter processing, so an unselected tracking fault cannot be hidden.
+- MuJoCo and in-memory hardware dry runs expose the identical selector, and CAD
+  telemetry records `commission_joint` on every row. Sign acceptance therefore
+  requires five separate rest/home/selected-axis/rest runs rather than one
+  all-axis pending-mapping run.
+- This change was implemented and tested offline only. No camera or robot was
+  opened.
+- Full `.venv` and no-arm `.venv-arm18` suites each pass 269 tests after the
+  isolated-axis commissioning gate was added.
+
+### 2026-08-19 — Milestone 32: live CAD deadman made physically hold-to-run
+
+- Live CAD output no longer accepts the terminal `e/r` latch. Every live
+  command requires an explicit Linux evdev device and key code. The kernel key
+  state is queried on every control iteration; release holds immediately, and
+  device loss records one held telemetry row before a safety stop and return
+  to rest.
+- The device must be readable, support the selected key, and be released at
+  initial preflight, immediately before backend construction, immediately
+  before robot connection, and after the automatic home ramp. A fresh physical
+  press is therefore required for command motion.
+- `scripts/check_hold_to_run.py` qualifies a release/press/release cycle without
+  importing the robot driver. CAD telemetry records the source, device, key
+  code, state age, and press/release generations.
+
+### 2026-08-19 — Milestone 33: CAD MuJoCo restored to zero and viewer keys fixed
+
+- Inspection of the first joint-0 attempt found 738 valid fresh locked-root
+  packets and no receiver faults, but `deadman_pressed=false` and zero press
+  generations throughout. The terminal-only latch, not tracking, caused the
+  stationary simulation.
+- The MuJoCo-only commissioning profile now starts, anchors, and returns to
+  `[0,0,0,0,0,0]`. The physical hardware profile retains its separate guarded
+  all-zero-rest to normal-home command lifecycle.
+- The passive MuJoCo window now handles `E` engage, `R` release/re-anchor, and
+  `Q` quit directly. Terminal commands remain available for dry diagnostics.
+- Full `.venv` and no-arm `.venv-arm18` suites each pass 288 tests. The sibling
+  CAD repository verifier passes all 25 tests. No robot was opened.
 
 ## Next planned work
 
@@ -1796,8 +1916,8 @@ changing another variable.
    remain pending.
 5. Two-arm driver output still requires accepted per-arm calibrations,
    measured bases, all safety gates, explicit current authorization, and the
-   dual token `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`. The normal Behind
-   Behind and Mirrored profiles now satisfy the stored calibration gate; do not
+   dual token `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`. The normal Behind and
+   Mirrored profiles now satisfy the stored calibration gate; do not
    weaken the other gates or reuse a single-arm token.
 6. At 300 mm base separation the two arms collide when yawed roughly 0.25 rad
    toward each other, and the 30 mm clearance margin rejects at about
@@ -1805,10 +1925,9 @@ changing another variable.
    not describe the measured 500 mm bench. Re-derive task-specific clearance
    limits at the measured separation before expecting overlapping bimanual
    tasks.
-7. `scripts/run_cad_sim.py` passes 13 telemetry keys that `TELEMETRY_COLUMNS`
-   never declared, so they have always been silently discarded. This is
-   pre-existing and left unchanged; `tests/test_dual_arm_safety.py` pins it as
-   a known exception so it cannot spread.
+7. The CAD telemetry silent-drop exception is fixed. Keep both CAD launchers on
+   the strict `CAD_TELEMETRY_COLUMNS` schema; an undeclared field is a test
+   failure rather than silently missing evidence.
 8. Measure camera glass-to-glass latency plus active bimanual WebXR pose-rate
    impact, and add an operator-critical camera-loss hold policy before treating
    the accepted three-view UI as ready for unattended remote teleoperation.
