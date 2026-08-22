@@ -62,6 +62,49 @@ def test_packet_parser_requires_complete_named_finite_fresh_state() -> None:
     )
     np.testing.assert_array_equal(parsed.q, np.arange(5.0))
     assert parsed.root_locked
+    assert parsed.frame_time_ns is None
+
+    timed = packet()
+    timed.update(
+        publish_time_ns=timed["time_ns"],
+        frame_time_ns=980_000_000,
+        frame_time_domain="global_time",
+        frame_skew_ms=0.35,
+        capture_to_publish_ms=20.0,
+    )
+    parsed_timed = parse_cad_joint_packet(
+        timed,
+        arrival_monotonic_ns=500,
+        arrival_epoch_ns=1_050_000_000,
+    )
+    assert parsed_timed.frame_time_ns == 980_000_000
+    assert parsed_timed.frame_time_domain == "global_time"
+    assert parsed_timed.frame_skew_ms == pytest.approx(0.35)
+
+    inconsistent_publish = timed.copy()
+    inconsistent_publish["publish_time_ns"] += 1
+    with pytest.raises(CadInputError, match="must match"):
+        parse_cad_joint_packet(
+            inconsistent_publish,
+            arrival_monotonic_ns=500,
+            arrival_epoch_ns=1_050_000_000,
+        )
+    wrong_domain = timed.copy()
+    wrong_domain["frame_time_domain"] = "hardware_clock"
+    with pytest.raises(CadInputError, match="global_time"):
+        parse_cad_joint_packet(
+            wrong_domain,
+            arrival_monotonic_ns=500,
+            arrival_epoch_ns=1_050_000_000,
+        )
+    future_frame = timed.copy()
+    future_frame["frame_time_ns"] = timed["time_ns"] + 1
+    with pytest.raises(CadInputError, match="later than publish"):
+        parse_cad_joint_packet(
+            future_frame,
+            arrival_monotonic_ns=500,
+            arrival_epoch_ns=1_050_000_000,
+        )
 
     unlocked = packet()
     unlocked["root_locked"] = False
@@ -161,6 +204,29 @@ def test_watchdog_rejects_tracker_jump_and_sequence_restart() -> None:
     assert restarted.last_discontinuity == "sequence_restart"
 
 
+def test_watchdog_ignores_unselected_joint_jump_but_checks_selected_joints() -> None:
+    watchdog = CadFreshnessWatchdog(
+        0.1,
+        2,
+        np.full(5, 0.12),
+        monitored_joints=(0, 1, 2),
+    )
+    watchdog.observe(sample(1, 10_000_000), 10_000_000)
+    assert watchdog.observe(sample(2, 20_000_000), 20_000_000).fresh
+
+    unselected_jump = watchdog.observe(
+        sample(3, 30_000_000, [0.0, 0.0, 0.0, 0.5, 0.0]),
+        30_000_000,
+    )
+    assert unselected_jump.fresh
+    selected_jump = watchdog.observe(
+        sample(4, 40_000_000, [0.0, 0.0, 0.5, 0.5, 0.0]),
+        40_000_000,
+    )
+    assert not selected_jump.fresh
+    assert selected_jump.last_discontinuity == "source_jump_joint_2"
+
+
 def test_deadman_is_relative_and_requires_release_after_stale() -> None:
     mapper = CadRestMapper(
         rest_q=np.zeros(6),
@@ -228,6 +294,25 @@ def test_mapper_fails_closed_outside_rest_envelope_and_keeps_j5_at_rest() -> Non
     with pytest.raises(CadSafetyError, match="joint 1"):
         mapper.map([0.0, -0.01, 0.0, 0.0, 0.0])
     assert not np.any(mapper.map([0.0, 0.01, 0.0, 0.0, 0.0])[5:])
+
+
+def test_simulation_mapper_clips_boundary_joint_without_holding_other_joints() -> None:
+    mapper = CadRestMapper(
+        rest_q=np.zeros(6),
+        signs=np.ones(5),
+        scales=np.ones(5),
+        clip_to_command_limits=True,
+        command_limits=commissioning_limits(),
+    )
+    mapper.engage(np.zeros(5), np.zeros(6))
+
+    # J1 attempts to cross its zero lower limit while J0 and J3 have valid
+    # motion. Only J1 saturates; the valid joints continue at one-for-one scale.
+    np.testing.assert_allclose(
+        mapper.map([0.02, -0.001, 0.01, -0.015, 0.0]),
+        [0.02, 0.0, 0.01, -0.015, 0.0, 0.0],
+        atol=1e-12,
+    )
 
 
 def test_mapper_deadband_holds_exact_rest_for_visual_jitter() -> None:
@@ -300,6 +385,23 @@ def test_isolated_commissioning_joint_keeps_every_other_joint_at_home() -> None:
                 commission_joint=invalid,
                 command_limits=np.tile([-2.0, 2.0], (6, 1)),
             )
+
+
+def test_multi_joint_commissioning_moves_only_selected_axes_and_saturates() -> None:
+    limits = commissioning_limits()
+    mapper = CadRestMapper(
+        rest_q=np.zeros(6),
+        signs=np.array([1.0, 1.0, -1.0, -1.0, -1.0]),
+        scales=np.ones(5),
+        commission_joints=(0, 1, 2),
+        clip_to_command_limits=True,
+        command_limits=limits,
+    )
+    mapper.engage(np.zeros(5), np.zeros(6))
+    target = mapper.map([0.2, -0.3, -0.4, 0.5, 0.5])
+
+    # J1's impossible negative target clips at zero. J3/J4 remain at rest.
+    np.testing.assert_allclose(target, [0.04, 0.0, 0.04, 0.0, 0.0, 0.0])
 
 
 def test_angle_delta_uses_shortest_path_across_pi() -> None:

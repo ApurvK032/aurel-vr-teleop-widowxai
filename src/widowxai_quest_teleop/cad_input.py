@@ -47,18 +47,66 @@ def cad_commission_joint_index(value: Any) -> int | None:
     return joint
 
 
+def cad_commission_joint_indices(value: Any) -> tuple[int, ...] | None:
+    """Validate an optional nonempty set of follower joint indices."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        fields = [field.strip() for field in value.split(",")]
+        if not fields or any(not field for field in fields):
+            raise CadSafetyError(
+                "CAD commission joints must be comma-separated integers from 0 through 4"
+            )
+        try:
+            raw_joints: Sequence[Any] = [int(field) for field in fields]
+        except ValueError:
+            raise CadSafetyError(
+                "CAD commission joints must be comma-separated integers from 0 through 4"
+            ) from None
+    elif isinstance(value, (int, np.integer)) and not isinstance(
+        value, (bool, np.bool_)
+    ):
+        raw_joints = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        raw_joints = value
+    else:
+        raise CadSafetyError(
+            "CAD commission joints must contain integers from 0 through 4"
+        )
+
+    joints: list[int] = []
+    for raw_joint in raw_joints:
+        joint = cad_commission_joint_index(raw_joint)
+        assert joint is not None
+        if joint in joints:
+            raise CadSafetyError("CAD commission joints must not contain duplicates")
+        joints.append(joint)
+    if not joints:
+        raise CadSafetyError("CAD commission joints must not be empty")
+    return tuple(joints)
+
+
 def validate_cad_commissioning_selection(
     *,
     live: bool,
     mapping_status: str,
     accept_unvalidated_mapping: bool,
-    commission_joint: int | None,
-) -> int | None:
-    """Require isolated-axis operation for every pending physical mapping."""
+    commission_joint: int | None = None,
+    commission_joints: Any = None,
+    allowed_pending_joint_sets: Any = None,
+) -> tuple[int, ...] | None:
+    """Validate the selected follower axes for a commissioning run."""
 
-    joint = cad_commission_joint_index(commission_joint)
+    if commission_joint is not None and commission_joints is not None:
+        raise CadSafetyError(
+            "pass either --commission-joint or --commission-joints, not both"
+        )
+    selection = cad_commission_joint_indices(
+        commission_joint if commission_joints is None else commission_joints
+    )
     if not live or mapping_status == CAD_MAPPING_ACCEPTED:
-        return joint
+        return selection
     if mapping_status != CAD_MAPPING_PENDING:
         raise CadSafetyError(f"unknown CAD mapping status: {mapping_status}")
     if not accept_unvalidated_mapping:
@@ -66,12 +114,34 @@ def validate_cad_commissioning_selection(
             "CAD signs are still candidate evidence; live output requires "
             "--accept-unvalidated-mapping"
         )
-    if joint is None:
+    if selection is None:
         raise CadSafetyError(
-            "pending CAD mapping can move only one follower joint; pass "
-            "--commission-joint 0, 1, 2, 3, or 4"
+            "pending CAD mapping requires --commission-joint or "
+            "--commission-joints"
         )
-    return joint
+    if allowed_pending_joint_sets is None:
+        allowed = {(joint,) for joint in range(5)}
+    else:
+        if not isinstance(allowed_pending_joint_sets, Sequence) or isinstance(
+            allowed_pending_joint_sets, (str, bytes, bytearray)
+        ):
+            raise CadSafetyError(
+                "commissioning.allowed_pending_joint_sets must be a list of joint lists"
+            )
+        allowed = {
+            cad_commission_joint_indices(raw_selection)
+            for raw_selection in allowed_pending_joint_sets
+        }
+    if selection not in allowed:
+        allowed_text = ", ".join(
+            "[" + ",".join(str(joint) for joint in candidate or ()) + "]"
+            for candidate in sorted(allowed)
+        )
+        raise CadSafetyError(
+            f"pending CAD mapping selection {list(selection)} is not allowed; "
+            f"allowed selections: {allowed_text}"
+        )
+    return selection
 
 
 def cad_live_confirmation_token(robot_ip: str) -> str:
@@ -217,6 +287,9 @@ class CadJointSample:
     arrival_epoch_ns: int
     q: np.ndarray
     root_locked: bool = False
+    frame_time_ns: int | None = None
+    frame_time_domain: str = ""
+    frame_skew_ms: float | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.sequence, bool) or int(self.sequence) < 0:
@@ -233,6 +306,21 @@ class CadJointSample:
         if not isinstance(self.root_locked, (bool, np.bool_)):
             raise CadInputError("CAD root_locked must be boolean")
         object.__setattr__(self, "root_locked", bool(self.root_locked))
+        if self.frame_time_ns is not None:
+            if isinstance(self.frame_time_ns, bool) or int(self.frame_time_ns) <= 0:
+                raise CadInputError("CAD frame timestamp must be a positive integer")
+            object.__setattr__(self, "frame_time_ns", int(self.frame_time_ns))
+        if not isinstance(self.frame_time_domain, str):
+            raise CadInputError("CAD frame timestamp domain must be a string")
+        object.__setattr__(self, "frame_time_domain", self.frame_time_domain.strip())
+        if self.frame_skew_ms is not None:
+            try:
+                frame_skew_ms = float(self.frame_skew_ms)
+            except (TypeError, ValueError):
+                raise CadInputError("CAD frame skew must be finite and nonnegative") from None
+            if not np.isfinite(frame_skew_ms) or frame_skew_ms < 0.0:
+                raise CadInputError("CAD frame skew must be finite and nonnegative")
+            object.__setattr__(self, "frame_skew_ms", frame_skew_ms)
 
 
 def parse_cad_joint_packet(
@@ -289,6 +377,50 @@ def parse_cad_joint_packet(
         raise CadInputError("CAD sequence must be an integer")
     if isinstance(source_time, bool) or not isinstance(source_time, (int, np.integer)):
         raise CadInputError("CAD source timestamp must be an integer")
+    publish_time = payload.get("publish_time_ns", source_time)
+    if isinstance(publish_time, bool) or not isinstance(
+        publish_time, (int, np.integer)
+    ):
+        raise CadInputError("CAD publish timestamp must be an integer")
+    if int(publish_time) != int(source_time):
+        raise CadInputError("CAD time_ns and publish_time_ns must match")
+
+    frame_time_raw = payload.get("frame_time_ns")
+    frame_domain_raw = payload.get("frame_time_domain", "")
+    frame_skew_raw = payload.get("frame_skew_ms")
+    frame_time_ns: int | None = None
+    frame_domain = ""
+    frame_skew_ms: float | None = None
+    if frame_time_raw is not None:
+        if isinstance(frame_time_raw, bool) or not isinstance(
+            frame_time_raw, (int, np.integer)
+        ):
+            raise CadInputError("CAD frame timestamp must be an integer")
+        frame_time_ns = int(frame_time_raw)
+        if frame_time_ns <= 0:
+            raise CadInputError("CAD frame timestamp must be positive")
+        if not isinstance(frame_domain_raw, str):
+            raise CadInputError("CAD frame timestamp domain must be a string")
+        frame_domain = frame_domain_raw.strip()
+        if frame_domain != "global_time":
+            raise CadInputError(
+                "CAD frame timestamp must use the global_time domain"
+            )
+        if frame_time_ns > int(publish_time):
+            raise CadInputError("CAD frame timestamp is later than publish time")
+        if frame_skew_raw is not None:
+            try:
+                frame_skew_ms = float(frame_skew_raw)
+            except (TypeError, ValueError):
+                raise CadInputError(
+                    "CAD frame skew must be finite and nonnegative"
+                ) from None
+            if not np.isfinite(frame_skew_ms) or frame_skew_ms < 0.0:
+                raise CadInputError("CAD frame skew must be finite and nonnegative")
+    elif frame_domain_raw not in ("", None) or frame_skew_raw is not None:
+        raise CadInputError(
+            "CAD frame timing metadata requires frame_time_ns"
+        )
 
     monotonic_ns = time.perf_counter_ns() if arrival_monotonic_ns is None else int(arrival_monotonic_ns)
     epoch_ns = time.time_ns() if arrival_epoch_ns is None else int(arrival_epoch_ns)
@@ -313,6 +445,9 @@ def parse_cad_joint_packet(
         arrival_epoch_ns=epoch_ns,
         q=ordered,
         root_locked=root_locked,
+        frame_time_ns=frame_time_ns,
+        frame_time_domain=frame_domain,
+        frame_skew_ms=frame_skew_ms,
     )
 
 
@@ -336,6 +471,7 @@ class CadFreshnessWatchdog:
         timeout_s: float,
         fresh_samples_to_recover: int,
         max_source_step_rad: np.ndarray,
+        monitored_joints: Sequence[int] | None = None,
     ) -> None:
         timeout = float(timeout_s)
         if not np.isfinite(timeout) or timeout <= 0.0:
@@ -349,6 +485,12 @@ class CadFreshnessWatchdog:
         )
         if np.any(self.max_source_step_rad <= 0.0):
             raise ValueError("CAD source step limits must be positive")
+        self.monitored_joints = (
+            tuple(range(5))
+            if monitored_joints is None
+            else cad_commission_joint_indices(monitored_joints)
+        )
+        assert self.monitored_joints is not None
 
         self.last_sequence: int | None = None
         self.last_q: np.ndarray | None = None
@@ -382,7 +524,10 @@ class CadFreshnessWatchdog:
         jump_joint: int | None = None
         if not restarted and self.last_q is not None:
             step = np.abs(wrapped_angle_delta(sample.q, self.last_q))
-            outside = np.flatnonzero(step > self.max_source_step_rad + 1e-12)
+            monitored = np.asarray(self.monitored_joints, dtype=int)
+            outside = monitored[
+                step[monitored] > self.max_source_step_rad[monitored] + 1e-12
+            ]
             if outside.size:
                 jump_joint = int(outside[0])
 
@@ -450,12 +595,24 @@ def rest_command_limits(
     return np.column_stack([lower, upper])
 
 
+def require_cad_joint5_locked(q_arm: np.ndarray, locked_joint5_rad: float) -> None:
+    """Reject any CAD command that could move the unobserved final arm joint."""
+
+    q = _finite_vector(q_arm, 6, "CAD arm command")
+    locked = float(locked_joint5_rad)
+    if not np.isfinite(locked) or abs(q[5] - locked) > 1e-12:
+        raise CadSafetyError(
+            "CAD demo joint 5 command changed from its session lock"
+        )
+
+
 def validate_cad_hardware_config(config: dict[str, Any]) -> None:
-    """Validate the deliberately narrow first physical CAD profile.
+    """Validate a guarded physical CAD commissioning profile.
 
     This validator is independent of the Quest/IK configuration because CAD
-    packets already contain joint estimates.  It keeps the initial physical
-    experiment bounded to a short, low-speed, five-joint commissioning run.
+    packets already contain joint estimates. Supported profiles preserve the
+    same hard hardware gates while varying only the deliberately selected
+    commissioning axes and their bounded response.
     """
 
     try:
@@ -466,6 +623,11 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
         hardware = config["hardware"]
     except (KeyError, TypeError) as exc:
         raise CadSafetyError(f"CAD hardware configuration is missing {exc}") from None
+
+    profile = str(commissioning.get("profile", "isolated_first_run"))
+    if profile not in ("isolated_first_run", "j012_model_saturated"):
+        raise CadSafetyError(f"unknown CAD commissioning profile: {profile}")
+    j012_profile = profile == "j012_model_saturated"
 
     required_true = (
         "enabled",
@@ -481,27 +643,54 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
         raise CadSafetyError(
             "CAD commissioning must leave the untracked gripper disabled"
         )
-    hold_to_run = hardware.get("hold_to_run")
-    if not isinstance(hold_to_run, dict):
-        raise CadSafetyError("hardware.hold_to_run configuration is required")
-    if hold_to_run.get("enabled") is not True:
-        raise CadSafetyError("hardware.hold_to_run.enabled must be true")
-    if hold_to_run.get("backend") != "linux_evdev_key":
-        raise CadSafetyError(
-            "hardware.hold_to_run.backend must be linux_evdev_key"
-        )
-    if hold_to_run.get("require_explicit_device") is not True:
-        raise CadSafetyError(
-            "hardware.hold_to_run.require_explicit_device must be true"
-        )
-    if hold_to_run.get("require_initial_release") is not True:
-        raise CadSafetyError(
-            "hardware.hold_to_run.require_initial_release must be true"
-        )
-    try:
-        validate_evdev_key_code(hold_to_run.get("key_code"))
-    except HoldToRunError as exc:
-        raise CadSafetyError(str(exc)) from None
+    activation = hardware.get("activation", {"mode": "physical_hold_to_run"})
+    if not isinstance(activation, dict):
+        raise CadSafetyError("hardware.activation must be a mapping")
+    activation_mode = str(activation.get("mode", "physical_hold_to_run"))
+    if activation_mode == "physical_hold_to_run":
+        hold_to_run = hardware.get("hold_to_run")
+        if not isinstance(hold_to_run, dict):
+            raise CadSafetyError("hardware.hold_to_run configuration is required")
+        if hold_to_run.get("enabled") is not True:
+            raise CadSafetyError("hardware.hold_to_run.enabled must be true")
+        if hold_to_run.get("backend") != "linux_evdev_key":
+            raise CadSafetyError(
+                "hardware.hold_to_run.backend must be linux_evdev_key"
+            )
+        if hold_to_run.get("require_explicit_device") is not True:
+            raise CadSafetyError(
+                "hardware.hold_to_run.require_explicit_device must be true"
+            )
+        if hold_to_run.get("require_initial_release") is not True:
+            raise CadSafetyError(
+                "hardware.hold_to_run.require_initial_release must be true"
+            )
+        try:
+            validate_evdev_key_code(hold_to_run.get("key_code"))
+        except HoldToRunError as exc:
+            raise CadSafetyError(str(exc)) from None
+    elif activation_mode == "automatic_after_rest":
+        if not j012_profile:
+            raise CadSafetyError(
+                "automatic activation is permitted only for the J0/J1/J2 profile"
+            )
+        if "hold_to_run" in hardware:
+            raise CadSafetyError(
+                "automatic J0/J1/J2 activation must not retain a misleading "
+                "hardware.hold_to_run block"
+            )
+        try:
+            countdown_s = float(activation.get("countdown_s"))
+        except (TypeError, ValueError):
+            raise CadSafetyError(
+                "automatic activation countdown must be finite"
+            ) from None
+        if not np.isfinite(countdown_s) or not 3.0 <= countdown_s <= 10.0:
+            raise CadSafetyError(
+                "automatic activation countdown must be within [3, 10] seconds"
+            )
+    else:
+        raise CadSafetyError(f"unknown CAD hardware activation mode: {activation_mode}")
 
     names = cad.get("expected_names")
     if not isinstance(names, list) or tuple(names) != DEFAULT_CAD_JOINT_NAMES:
@@ -543,17 +732,14 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
             raise CadSafetyError(str(exc)) from None
 
     canonical_rest = np.zeros(6)
-    canonical_home = np.array(
-        [0.0, np.pi / 3.0, 5.0 * np.pi / 12.0, -np.pi / 3.0, 0.0, 0.0]
-    )
     if not np.allclose(
         parsed["model.rest_q_rad"], canonical_rest, atol=1e-9, rtol=0.0
     ):
         raise CadSafetyError("first CAD physical profile must start at all-zero rest")
     if not np.allclose(
-        parsed["model.command_anchor_q_rad"], canonical_home, atol=1e-9, rtol=0.0
+        parsed["model.command_anchor_q_rad"], canonical_rest, atol=1e-9, rtol=0.0
     ):
-        raise CadSafetyError("first CAD physical profile must anchor at normal home")
+        raise CadSafetyError("first CAD physical profile must anchor at all-zero rest")
     try:
         hardware_rest = _finite_vector(
             hardware.get("rest_q_rad"), 6, "hardware.rest_q_rad"
@@ -569,8 +755,12 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
     source_steps = parsed["cad.max_source_step_rad"]
     if not np.all(np.isin(signs, (-1.0, 1.0))):
         raise CadSafetyError("CAD physical signs must be exactly -1 or +1")
-    if np.any(scales <= 0.0) or np.any(scales > 0.10 + 1e-12):
-        raise CadSafetyError("first CAD physical scales must be within (0, 0.10]")
+    scale_ceiling = 0.50 if j012_profile else 0.30
+    if np.any(scales <= 0.0) or np.any(scales > scale_ceiling + 1e-12):
+        raise CadSafetyError(
+            f"CAD physical scales must be within (0, {scale_ceiling:.2f}] "
+            f"for the {profile} profile"
+        )
     if np.any(deadbands < 0.0):
         raise CadSafetyError("CAD source deadbands must be nonnegative")
     if np.any(source_steps <= 0.0) or np.any(source_steps > 0.12 + 1e-12):
@@ -580,15 +770,42 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
     maximum = parsed["commissioning.maximum_delta_rad"]
     if np.any(minimum > 0.0) or np.any(maximum < 0.0) or np.any(minimum >= maximum):
         raise CadSafetyError("CAD commissioning travel must straddle zero")
-    if np.any(np.maximum(np.abs(minimum[:5]), np.abs(maximum[:5])) > np.deg2rad(2.0) + 1e-9):
-        raise CadSafetyError("first CAD physical envelope is limited to two degrees")
+    if j012_profile:
+        model_envelope = np.array(
+            [3.05433, 3.14159, 2.35619, 1e-5, 1e-5], dtype=float
+        )
+        if np.any(
+            np.maximum(np.abs(minimum[:5]), np.abs(maximum[:5]))
+            > model_envelope + 1e-9
+        ):
+            raise CadSafetyError(
+                "J0/J1/J2 profile exceeds official model travel or unlocks J3/J4"
+            )
+        if commissioning.get("clip_to_command_limits") is not True:
+            raise CadSafetyError(
+                "J0/J1/J2 profile must saturate targets at official command limits"
+            )
+    else:
+        per_joint_envelope = np.deg2rad([60.0, 2.0, 2.0, 2.0, 2.0])
+        if np.any(
+            np.maximum(np.abs(minimum[:5]), np.abs(maximum[:5]))
+            > per_joint_envelope + 1e-9
+        ):
+            raise CadSafetyError(
+                "CAD physical envelopes exceed the sixty/two-degree per-joint limits"
+            )
     if max(abs(minimum[5]), abs(maximum[5])) > 1e-5:
         raise CadSafetyError("untracked WidowX joint 5 must remain fixed")
     if np.any(parsed["commissioning.max_command_step_rad"] <= 0.0):
         raise CadSafetyError("CAD command-step caps must be positive")
     maximum_command_step = parsed["commissioning.max_command_step_rad"]
-    if np.any(maximum_command_step[:5] > 0.003 + 1e-12) or maximum_command_step[5] > 2e-6 + 1e-12:
-        raise CadSafetyError("CAD per-tick command caps exceed the first-run limits")
+    step_ceiling = (
+        np.array([0.006, 0.006, 0.006, 2e-6, 2e-6, 2e-6])
+        if j012_profile
+        else np.array([0.003, 0.003, 0.003, 0.003, 0.003, 2e-6])
+    )
+    if np.any(maximum_command_step > step_ceiling + 1e-12):
+        raise CadSafetyError("CAD per-tick command caps exceed the profile limits")
     startup_step = parsed["hardware.startup_max_joint_delta_rad"]
     if np.any(startup_step <= 0.0) or np.any(startup_step > 0.006 + 1e-12):
         raise CadSafetyError("CAD startup step caps must be within (0, 0.006] rad")
@@ -602,6 +819,12 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
         "hardware.startup_ramp_rate_hz": hardware.get("startup_ramp_rate_hz"),
         "hardware.max_feedback_error_rad": hardware.get("max_feedback_error_rad"),
         "hardware.feedback_check_rate_hz": hardware.get("feedback_check_rate_hz"),
+        "hardware.fixed_joint_5_max_drift_rad": hardware.get(
+            "fixed_joint_5_max_drift_rad"
+        ),
+        "hardware.fixed_gripper_max_drift_m": hardware.get(
+            "fixed_gripper_max_drift_m"
+        ),
         "hardware.shutdown_move_duration_s": hardware.get("shutdown_move_duration_s"),
         "hardware.startup_rest_tolerance_rad": hardware.get(
             "startup_rest_tolerance_rad"
@@ -616,8 +839,30 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
             raise CadSafetyError(f"{name} must be finite and positive")
     if float(control["loop_rate_hz"]) > 100.0:
         raise CadSafetyError("first CAD physical loop must not exceed 100 Hz")
-    if not 0.025 <= float(hardware["command_goal_time_s"]) <= 0.030:
-        raise CadSafetyError("first CAD physical driver horizon must be 25-30 ms")
+    if float(hardware["fixed_joint_5_max_drift_rad"]) > 0.005 + 1e-12:
+        raise CadSafetyError(
+            "fixed CAD joint 5 drift limit must not exceed 0.005 rad"
+        )
+    if float(hardware["fixed_gripper_max_drift_m"]) > 0.001 + 1e-12:
+        raise CadSafetyError(
+            "fixed CAD gripper drift limit must not exceed 0.001 m"
+        )
+    try:
+        marginal_start = float(hardware.get("startup_marginal_contact_m", 0.0))
+    except (TypeError, ValueError):
+        raise CadSafetyError(
+            "CAD startup marginal contact limit must be finite and nonnegative"
+        ) from None
+    if (
+        not np.isfinite(marginal_start)
+        or marginal_start < 0.0
+        or marginal_start > 0.002 + 1e-12
+    ):
+        raise CadSafetyError(
+            "CAD startup marginal contact limit must be within [0, 0.002] m"
+        )
+    if not 0.020 <= float(hardware["command_goal_time_s"]) <= 0.030:
+        raise CadSafetyError("CAD physical driver horizon must be 20-30 ms")
     if float(hardware["max_feedback_error_rad"]) > 0.08:
         raise CadSafetyError("CAD feedback stop must not exceed 0.08 rad")
     if float(hardware["startup_rest_tolerance_rad"]) > 0.08:
@@ -687,15 +932,37 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
         duration_s = float(duration)
     except (TypeError, ValueError):
         raise CadSafetyError("CAD maximum demo duration must be finite") from None
-    if not np.isfinite(duration_s) or not 0.0 < duration_s <= 15.0:
-        raise CadSafetyError("first CAD physical run is capped at 15 seconds")
+    duration_ceiling_s = 20.0 if j012_profile else 15.0
+    if not np.isfinite(duration_s) or not 0.0 < duration_s <= duration_ceiling_s:
+        raise CadSafetyError(
+            f"CAD physical run is capped at {duration_ceiling_s:g} seconds"
+        )
 
     if commissioning.get("mapping_status") not in (
         CAD_MAPPING_PENDING,
         CAD_MAPPING_ACCEPTED,
     ):
         raise CadSafetyError("CAD mapping status is missing or unknown")
-    if commissioning.get("require_isolated_joint_while_pending") is not True:
+    if j012_profile:
+        if commissioning.get("require_isolated_joint_while_pending") is not False:
+            raise CadSafetyError(
+                "J0/J1/J2 profile must explicitly disable isolated-axis selection"
+            )
+        allowed_sets = commissioning.get("allowed_pending_joint_sets")
+        try:
+            parsed_allowed_sets = {
+                cad_commission_joint_indices(raw_selection)
+                for raw_selection in allowed_sets
+            }
+        except (CadSafetyError, TypeError):
+            raise CadSafetyError(
+                "J0/J1/J2 profile requires allowed_pending_joint_sets: [[0, 1, 2]]"
+            ) from None
+        if parsed_allowed_sets != {(0, 1, 2)}:
+            raise CadSafetyError(
+                "J0/J1/J2 profile permits exactly the pending set [0, 1, 2]"
+            )
+    elif commissioning.get("require_isolated_joint_while_pending") is not True:
         raise CadSafetyError(
             "commissioning.require_isolated_joint_while_pending must be true"
         )
@@ -716,10 +983,18 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
         raise CadSafetyError(str(exc)) from None
     if np.any(max_velocity <= 0.0) or np.any(max_acceleration <= 0.0):
         raise CadSafetyError("CAD velocity and acceleration limits must be positive")
-    if np.any(max_velocity[:5] > 0.10 + 1e-12) or np.any(
-        max_acceleration[:5] > 0.50 + 1e-12
+    if j012_profile:
+        velocity_ceiling = np.array([0.50, 0.50, 0.50, 0.0001, 0.0001])
+        acceleration_ceiling = np.array([2.00, 2.00, 2.00, 0.001, 0.001])
+    else:
+        velocity_ceiling = np.array([0.25, 0.10, 0.10, 0.10, 0.10])
+        acceleration_ceiling = np.array([1.00, 0.50, 0.50, 0.50, 0.50])
+    if np.any(max_velocity[:5] > velocity_ceiling + 1e-12) or np.any(
+        max_acceleration[:5] > acceleration_ceiling + 1e-12
     ):
-        raise CadSafetyError("CAD velocity/acceleration exceed first-run limits")
+        raise CadSafetyError(
+            "CAD velocity/acceleration exceed the joint-specific limits"
+        )
     per_tick = max_velocity / float(control["loop_rate_hz"])
     if np.any(per_tick > parsed["commissioning.max_command_step_rad"] + 1e-12):
         raise CadSafetyError("CAD velocity limits exceed the per-tick command caps")
@@ -736,6 +1011,8 @@ class CadRestMapper:
         scales: np.ndarray,
         source_deadband_rad: np.ndarray | None = None,
         commission_joint: int | None = None,
+        commission_joints: Sequence[int] | None = None,
+        clip_to_command_limits: bool = False,
         command_limits: np.ndarray,
     ) -> None:
         self.rest_q = _finite_vector(rest_q, 6, "rest position")
@@ -750,7 +1027,20 @@ class CadRestMapper:
         )
         if np.any(self.source_deadband_rad < 0.0):
             raise CadSafetyError("CAD source deadband must be nonnegative")
-        self.commission_joint = cad_commission_joint_index(commission_joint)
+        if commission_joint is not None and commission_joints is not None:
+            raise CadSafetyError(
+                "provide either commission_joint or commission_joints, not both"
+            )
+        self.commission_joints = cad_commission_joint_indices(
+            commission_joint if commission_joints is None else commission_joints
+        )
+        self.commission_joint = (
+            self.commission_joints[0]
+            if self.commission_joints is not None
+            and len(self.commission_joints) == 1
+            else None
+        )
+        self.clip_to_command_limits = bool(clip_to_command_limits)
         self.command_limits = np.asarray(command_limits, dtype=float).reshape(6, 2)
         if not np.all(np.isfinite(self.command_limits)) or np.any(
             self.command_limits[:, 0] >= self.command_limits[:, 1]
@@ -777,10 +1067,11 @@ class CadRestMapper:
         self._robot_anchor = robot.copy()
         self.engaged = True
         self.reanchor_generation += 1
-        if self.commission_joint is None:
+        if self.commission_joints is None:
             return robot.copy()
         anchored = self.rest_q.copy()
-        anchored[self.commission_joint] = robot[self.commission_joint]
+        selected = np.asarray(self.commission_joints, dtype=int)
+        anchored[selected] = robot[selected]
         return anchored
 
     def map(self, source_q: np.ndarray) -> np.ndarray:
@@ -794,13 +1085,12 @@ class CadRestMapper:
         )
         mapped_delta = self.signs * self.scales * source_delta
         target = self._robot_anchor.copy()
-        if self.commission_joint is None:
+        if self.commission_joints is None:
             target[:5] += mapped_delta
         else:
-            # Pending physical sign checks are deliberately one-axis-only.
-            # Every unselected tracked joint is commanded to the configured
-            # home pose even if its visual estimate drifts.
-            selected = self.commission_joint
+            # Every unselected tracked joint stays at the configured rest pose
+            # even if its visual estimate drifts.
+            selected = np.asarray(self.commission_joints, dtype=int)
             target[:5] = self.rest_q[:5]
             target[selected] = self._robot_anchor[selected] + mapped_delta[selected]
         # The leader currently publishes five joints. Keep J5 at rest rather
@@ -811,6 +1101,17 @@ class CadRestMapper:
             | (target > self.command_limits[:, 1] + 1e-12)
         )
         if outside.size:
+            if self.clip_to_command_limits:
+                # The all-zero pose starts J1/J2 exactly at their official lower
+                # limits. Saturation lets a deliberately selected commissioning
+                # profile tolerate unreachable printed-leader poses without
+                # weakening the official follower model limits.
+                target = np.clip(
+                    target,
+                    self.command_limits[:, 0],
+                    self.command_limits[:, 1],
+                )
+                return target
             joint = int(outside[0])
             raise CadSafetyError(
                 f"CAD target for joint {joint} left the commissioning envelope"

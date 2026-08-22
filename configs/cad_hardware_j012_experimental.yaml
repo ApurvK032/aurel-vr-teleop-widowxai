@@ -1,0 +1,99 @@
+project:
+  name: widowxai-cad-j012-model-saturated
+  mode: cad_joint_relative_guarded_hardware
+
+model:
+  xml_path: third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/wxai_follower.xml
+  rest_q_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  command_anchor_q_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+cad:
+  udp_host: 127.0.0.1
+  udp_port: 5055
+  expected_names: [link1_link, link2_link, link3_link, link4_link, link5_link]
+  require_root_locked: true
+  stale_timeout_s: 0.100
+  fresh_samples_to_recover: 3
+  max_packet_age_s: 0.100
+  max_future_skew_s: 0.050
+  max_source_step_rad: [0.12, 0.12, 0.12, 0.12, 0.12]
+  # Restore the original candidate mapping. Only J0/J1/J2 are commanded by
+  # this profile; J3/J4 visual motion cannot affect or interrupt the run.
+  signs: [1.0, 1.0, -1.0, -1.0, -1.0]
+  # Operator-approved physical response at 50%. The matching MuJoCo
+  # preview remains one-for-one so mapping can be checked before hardware use.
+  scales: [0.50, 0.50, 0.50, 0.50, 0.50]
+  source_deadband_rad: [0.03, 0.02, 0.01, 0.025, 0.15]
+  source_filter:
+    enabled: true
+    minimum_cutoff_hz: 2.0
+    speed_coefficient: 4.0
+    derivative_cutoff_hz: 2.0
+    maximum_cutoff_hz: 20.0
+
+commissioning:
+  profile: j012_model_saturated
+  mapping_status: candidate_pending_physical_validation
+  require_isolated_joint_while_pending: false
+  # A pending live launch must request this exact three-axis set.
+  allowed_pending_joint_sets: [[0, 1, 2]]
+  # Printed-leader targets outside the follower workspace saturate at these
+  # official model boundaries instead of terminating the session.
+  clip_to_command_limits: true
+  minimum_delta_rad: [-3.05433, 0.0, 0.0, -0.000001, -0.000001, -0.000001]
+  maximum_delta_rad: [3.05433, 3.14159, 2.35619, 0.000001, 0.000001, 0.000001]
+  max_command_step_rad: [0.006, 0.006, 0.006, 0.000002, 0.000002, 0.000002]
+
+control:
+  loop_rate_hz: 90
+  joint_command_limits:
+    enabled: true
+    # These are rate limits, not pose envelopes. They retain bounded physical
+    # motion while allowing J0/J1/J2 to use their complete model-valid travel.
+    max_velocity: [0.50, 0.50, 0.50, 0.0001, 0.0001, 0.0001]
+    max_acceleration: [2.00, 2.00, 2.00, 0.001, 0.001, 0.001]
+
+hardware:
+  enabled: true
+  live_output_implemented: true
+  require_explicit_enable: true
+  robot_ip: 192.168.1.3
+  workstation_preflight:
+    enabled: true
+    require_external_power: true
+    required_power_profile: performance
+    expected_robot_source_ip: 192.168.1.10
+    require_direct_route: true
+  end_effector_profile: legacy_1_8
+  driver_version_tested: 1.8.6
+  command_goal_time_s: 0.020
+  arm_velocity_feedforward:
+    enabled: false
+  control_gripper: false
+  # The operator explicitly requested automatic engagement for this supervised
+  # J012 demo. It begins only after every preflight and rest stabilization,
+  # followed by the visible countdown. S/Q still exits and returns to rest.
+  activation:
+    mode: automatic_after_rest
+    countdown_s: 3.0
+  start_at_rest: true
+  startup_rest_tolerance_rad: 0.08
+  startup_ramp_duration_s: 2.0
+  startup_ramp_rate_hz: 120
+  startup_max_joint_delta_rad: [0.006, 0.006, 0.006, 0.006, 0.006, 0.006]
+  startup_collision_samples: 501
+  startup_marginal_contact_m: 0.002
+  max_feedback_error_rad: 0.08
+  feedback_tracking_delay_s: 0.020
+  feedback_check_rate_hz: 50
+  fixed_joint_5_max_drift_rad: 0.005
+  fixed_gripper_max_drift_m: 0.001
+  max_gripper_delta_m: 0.044
+  max_demo_duration_s: 20.0
+  return_to_rest_on_exit: true
+  shutdown_move_duration_s: 2.0
+  rest_q_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  rest_gripper_m: 0.0
+
+telemetry:
+  output_dir: runs

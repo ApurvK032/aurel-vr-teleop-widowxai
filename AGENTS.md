@@ -1896,11 +1896,196 @@ changing another variable.
 - Full `.venv` and no-arm `.venv-arm18` suites each pass 288 tests. The sibling
   CAD repository verifier passes all 25 tests. No robot was opened.
 
+### 2026-08-21 — Milestone 34: CAD MuJoCo made full-scale
+
+- `configs/cad_home_commissioning_mujoco.yaml` now maps all five observed CAD
+  joints at 100% (one-for-one) scale. Its simulation deadbands are zero, its
+  command envelope uses the official WidowXAI joint ranges, and its simulation
+  motion limits follow the accepted 0.12 rad-per-source-frame watchdog ceiling.
+- The all-zero start/return pose, adaptive source filtering, root-lock,
+  timestamp, stale-stream, restart, and raw-jump watchdogs remain active.
+  Because the all-zero pose places model joints 1 and 2 exactly at their lower
+  limits, an out-of-range simulation target saturates only the affected joint;
+  it no longer latches all five joints because of boundary-level tracker noise.
+  `S`, a stale/rejected packet, tracker discontinuity, mapping error, model
+  collision, or command fault now returns MuJoCo to all-zero rest and leaves it
+  in `REST HOLD` until a fresh explicit `E`. `--simulation-auto-deadman` may
+  press `E` once at initial startup for smoke tests, but never re-arms after an
+  issue. On hardware, `S` and the same input/mapping/safety faults run the
+  guarded return to rest and terminate the process; live restart requires a
+  new full preflight and physical hold-to-run rather than a terminal latch.
+  Untracked joint 5 and the gripper remain exactly zero in MuJoCo and model
+  self-collisions still fail closed. For hardware, joint 5 is locked to its
+  measured session-start angle throughout startup/control/shutdown, the
+  gripper never enters position mode or receives a command, and feedback drift
+  beyond 0.005 rad / 0.001 m stops the run.
+- This change is simulation-only. `configs/cad_hardware_commissioning.yaml`
+  remains at 10% scale, a ±2° home-relative envelope, isolated pending-sign
+  commissioning, and every existing physical interlock.
+
+### 2026-08-21 — Milestone 35: CAD hardware anchored at all-zero rest
+
+- `configs/cad_hardware_commissioning.yaml` now keeps the follower at the same
+  all-zero rest pose as the printed leader instead of inserting a normal-home
+  pose before relative control. Position mode still uses the guarded two-second
+  stabilization path, and every normal/fault/S exit still returns to rest.
+- The first physical envelope remains 10%, at most two degrees, one selected
+  joint, 15 seconds, no gripper, and a session-locked joint 5. Because joints 1
+  and 2 are at their official lower bounds at zero, their commissioning ranges
+  are one-sided positive; all physical command-limit violations still fail
+  closed.
+- The measured right-arm rest-to-exact-zero path passes the same marginal-start
+  collision screen used for live startup. No physical motion was performed
+  after changing the anchor. Both `.venv` and `.venv-arm18` suites pass all 296
+  tests.
+
+### 2026-08-21 — Milestone 36: CAD physical gain raised to 30% by operator request
+
+- After three clean joint-0 runs repeatedly reached the existing two-degree
+  follower envelope through smooth leader motion, the operator explicitly
+  requested 30% physical response. `cad_hardware_commissioning.yaml` now uses
+  30% on the five candidate mappings.
+- Pending mapping remains exactly one joint at a time. After the first 30% run
+  cleanly reached the old joint-0 envelope through smooth source motion, the
+  operator explicitly requested relaxing the stopping constraint. Joint 0 is
+  now limited to ±6°—three times its old travel, proportional to the 10%→30%
+  gain change—then expanded to ±60° by a further explicit operator request,
+  while pending joints 1–4 remain within two degrees. The official model
+  reports no self-collision across the complete rest→±60° joint-0 paths, but
+  external workspace clearance remains the operator's responsibility.
+  Velocity/acceleration/per-tick limits are unchanged, and faults still
+  terminate and return to rest. With joint 0's 0.03 rad deadband, its
+  source-side boundary is approximately 201.7 degrees from the hold-to-run
+  anchor.
+
+### 2026-08-21 — Milestone 37: joint-0 response limits raised and horizon reduced
+
+- Physical telemetry showed the driver following the limited command within
+  0.00134 rad while joint-0 velocity limiting was active on most engaged rows;
+  the 25 ms driver horizon was not the multi-second response bottleneck.
+- By explicit operator request, joint 0 now uses 0.25 rad/s velocity and
+  1.0 rad/s² acceleration caps, while pending joints 1–4 retain 0.10 rad/s and
+  0.50 rad/s². The command horizon and time-aligned feedback reference are now
+  20 ms. The unchanged 0.003 rad per-tick gate still bounds joint-0 commands at
+  the 90 Hz loop rate.
+- Replaying the latest physical desired trace reduced peak limiter lag from the
+  observed 10.3° to 5.60°. No physical motion was performed after this change.
+  Both `.venv` and `.venv-arm18` suites pass all 299 tests.
+
+### 2026-08-21 — Milestone 38: CAD capture-to-encoder timing instrumented
+
+- The owner set a sub-35 ms physical leader-motion to follower-motion goal.
+  The latest run `20260821-163935_cad-right-j0-rest-30pct-fast-r9` does not meet
+  it: offline cross-correlation measures about 230 ms position / 215 ms
+  velocity phase from M3T packet arrival to encoder feedback. Desired-to-
+  limited-command accounts for about 175/165 ms, command-to-encoder about
+  20 ms, raw-to-filtered about 10/0 ms, UDP publication-to-receipt 1.27 ms p50
+  / 1.95 ms p95, and the driver call 0.22 ms p50 / 0.42 ms p95.
+- The old M3T `time_ns` is confirmed to be a post-optimization publish stamp,
+  not a camera timestamp. M3T now preserves that field and adds
+  `publish_time_ns`, host-correlated D455 `frame_time_ns`, timestamp domain,
+  frame skew, and capture-to-publish duration. The follower parser validates
+  this optional metadata and telemetry retains capture, publish, receipt,
+  control, send, and encoder times.
+- `scripts/analyze_cad_latency.py` reports direct timing distributions plus
+  position/velocity phase lag for source/filter/desired/command/feedback. Old
+  runs remain analyzable in partial mode. Cross-correlation is not a physical
+  onset measurement; synchronized high-speed video remains the independent
+  leader-link to follower-link ground truth.
+- The active D455 profile is 848 x 480 at 30 FPS. Its p95 arbitrary-onset
+  sampling wait is about 31.7 ms, leaving no physically possible budget for
+  tracking, control, and actuation under a 35 ms p95 target. A measured 60 FPS
+  profile and a much lower-lag limiter are prerequisites; neither has been
+  physically staged yet.
+- The M3T target builds successfully. Both Python environments pass all 301
+  tests. The currently running tracker was started from the old executable and
+  must be stopped and relaunched before capture timestamps appear. No camera
+  or robot was opened and no physical command was sent for this milestone.
+
+### 2026-08-21 — Milestone 39: joint-1 candidate sign corrected from evidence
+
+- Two isolated right-arm joint-1 attempts,
+  `20260821-170531_cad-right-j1-rest-30pct-positive-2deg-r1` and
+  `20260821-170549_cad-right-j1-rest-30pct-positive-2deg-r1`, stopped before
+  commanding any joint-1 motion. In both, the operator's intended leader
+  movement decreased filtered `link2_link` by about 1.25° / 1.21°. The old
+  positive sign mapped the amount just beyond the 0.02 rad source deadband to
+  forbidden negative follower travel at its official zero lower limit.
+- Joint 1's still-candidate sign is now `-1`. Replaying the exact traces maps
+  them to valid positive targets of 0.032° and 0.019° rather than raising an
+  envelope fault. The current full sign vector is `[+1,-1,-1,-1,-1]` in both
+  physical and current MuJoCo profiles.
+- This is a mapping correction, not a general constraint removal. Joint 1
+  remains isolated, 30% scaled, bounded to `[0°, +2°]`, and subject to the
+  hard model limit, source watchdog, hold-to-run, motion limits, collision
+  screen, feedback stop, 15-second cap, and return to rest. Its sign remains
+  pending until the operator observes the physical direction.
+- Focused configuration/mapping verification passes 51 tests. No arm or camera
+  was opened and no physical motion was performed after the sign change.
+
+### 2026-08-21 — Milestone 40: original sign restored and J0/J1/J2 profile added
+
+- The operator rejected milestone 39's sign inference: the printed leader is
+  imperfect and can request poses outside the follower workspace. The current
+  candidate mapping is restored to `[+1,+1,-1,-1,-1]` in both physical and
+  MuJoCo configurations. Milestone 39 remains only as historical evidence of
+  the two boundary stops.
+- `--commission-joints 0,1,2` now selects exactly the first three follower
+  axes. The new `cad_hardware_j012_experimental.yaml` is the only pending
+  physical profile authorized to accept that set; the baseline profile still
+  permits single-axis selection only.
+- The J012 profile retains 30% physical scale and a 15-second run, but uses the
+  full official J0/J1/J2 model ranges. Unreachable selected targets saturate
+  at those model boundaries instead of stopping the session. J3/J4 visual
+  jumps are not safety-relevant because those axes remain fixed at rest.
+  Joint 5 and the gripper also remain fixed.
+- This removes the artificial commissioning pose envelope, not hard safety.
+  Source freshness/restart checks on J0/J1/J2, hold-to-run, official model
+  limits, collision prediction, feedback supervision, bounded velocity and
+  acceleration, workstation/network preflight, and return to rest remain.
+  Focused tests pass 54/54; MuJoCo and in-memory hardware stream smokes pass.
+  No physical arm was opened or commanded for this milestone.
+
+### 2026-08-21 — Milestone 41: J0/J1/J2 automatic 20-second demo staged
+
+- After visually accepting the combined J0/J1/J2 MuJoCo behavior, the operator
+  explicitly requested removal of the Space hold and a 20-second physical run.
+  Only `cad_hardware_j012_experimental.yaml` uses the new
+  `automatic_after_rest` activation mode; the baseline CAD hardware profile
+  still requires its evdev hold-to-run control and remains capped at 15 s.
+- The J012 process does not move merely on import or before preflight. It first
+  validates the live token and exact `0,1,2` selection, workstation route,
+  fresh locked tracker stream, robot state, model path, fixed outputs, and
+  all-zero rest stabilization. It then displays a three-second countdown,
+  anchors the current filtered leader pose, and starts the 20-second window.
+- `S`/`Q` + Enter and Ctrl+C remain operator stops. Source, mapping, collision,
+  feedback, driver, or command faults still exit and perform the guarded return
+  to rest. J3/J4/joint5/gripper locks and all motion limits remain unchanged.
+- Both Python environments pass 308 tests. The automatic countdown/start/end
+  lifecycle passed an in-memory UDP/backend smoke. No physical driver was
+  opened and no arm command was sent while implementing this change.
+
+### 2026-08-21 — Milestone 42: J0/J1/J2 physical scale raised to 50%
+
+- By explicit operator request after the combined MuJoCo check passed, only
+  `cad_hardware_j012_experimental.yaml` changed from 30% to 50% source scale.
+  The baseline single-joint physical profile remains capped at 30%.
+- The J012 0.50 scale is enforced as that profile's validation ceiling. Its
+  0.50 rad/s velocity, 2.0 rad/s² acceleration, 0.006 rad/tick, official model,
+  collision, feedback, automatic countdown, 20-second, and return-to-rest
+  behavior are unchanged.
+- Focused CAD tests pass 59/59. No physical driver was opened and no arm
+  command was sent while changing the scale.
+
 ## Next planned work
 
 1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
-2. Measure transport RTT/clock offset and repeated controller/encoder reversal
-   events before claiming physical p95/p99 latency.
+2. Treat sub-35 ms as an unachieved CAD acceptance goal. Restart M3T to collect
+   D455 frame timestamps, run `scripts/analyze_cad_latency.py`, and report p50,
+   p95, p99, and maximum by stage. Then validate a 60 FPS tracker and a lower-
+   lag command profile in MuJoCo before any separately authorized physical run.
+   Use synchronized high-speed video before claiming true physical end-to-end
+   latency.
 3. Preserve Left/Mirror at its accepted 45% scope. Behind mapping is accepted
    at 40%; its staged 60% translation / 60% rotation response remains a
    benchmark profile, not a generally accepted scope. The rejected dynamic

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from scripts.run_hardware import (
+    apply_locked_arm_joints,
     make_startup_command_gate,
     open_gripper_at_home,
     ramp_to_home,
@@ -485,6 +486,60 @@ def test_startup_ramp_never_commands_or_tracks_the_gripper() -> None:
     backend = StuckGripperBackend()
     ramp_to_home(backend, gate, start, np.zeros(6), config)
     assert backend.include_gripper_values == [False]
+
+
+def test_startup_ramp_keeps_an_explicit_arm_joint_at_its_session_angle() -> None:
+    limits = np.vstack([np.tile([-1.0, 1.0], (6, 1)), [0.0, 0.044]])
+    start_q = np.zeros(6)
+    start_q[5] = 0.25
+    start = HardwareState(start_q, 0.02, limits, "1.11.0")
+
+    class FollowingBackend:
+        def __init__(self):
+            self.state = start
+            self.commands = []
+
+        def send_positions(self, q, gripper, *, include_gripper=True):
+            q = np.asarray(q, dtype=float)
+            self.commands.append((q.copy(), gripper, include_gripper))
+            self.state = HardwareState(q, self.state.gripper_position_m, limits, "1.11.0")
+
+        def read_state(self):
+            return self.state
+
+    gate = CommandGate(
+        start.q_arm,
+        start.gripper_position_m,
+        limits,
+        np.full(6, 0.5),
+        joint_limit_margin_rad=0.0,
+        gripper_limits_m=(0.0, 0.044),
+        max_gripper_delta_m=0.044,
+    )
+    config = {
+        "hardware": {
+            "startup_ramp_duration_s": 0.1,
+            "startup_ramp_rate_hz": 10,
+            "feedback_check_rate_hz": 10,
+            "max_feedback_error_rad": 0.01,
+        }
+    }
+    backend = FollowingBackend()
+    ramp_to_home(
+        backend,
+        gate,
+        start,
+        np.full(6, 0.1),
+        config,
+        locked_arm_joints={5: 0.25},
+    )
+    assert backend.commands
+    assert all(command[0][5] == pytest.approx(0.25) for command in backend.commands)
+    assert all(command[2] is False for command in backend.commands)
+    np.testing.assert_allclose(
+        apply_locked_arm_joints(np.zeros(6), {5: 0.25}),
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.25],
+    )
 
 
 def test_gripper_opens_after_home_with_previous_blocking_strategy() -> None:
@@ -1040,6 +1095,21 @@ def test_return_to_rest_checks_path_and_uses_blocking_backend_move() -> None:
     assert collision_paths[0][1]["start_gripper_q"] == collision_paths[0][1]["end_gripper_q"]
     np.testing.assert_array_equal(collision_paths[1][0][0], np.zeros(6))
     np.testing.assert_array_equal(collision_paths[1][0][1], np.zeros(6))
+
+    locked_start_q = np.full(6, 0.2)
+    locked_start_q[5] = 0.25
+    backend.state = HardwareState(locked_start_q, 0.04, limits, "1.8.3")
+    return_to_rest(
+        backend,
+        model,
+        config,
+        control_gripper=False,
+        locked_arm_joints={5: 0.25},
+        locked_gripper_position_m=0.04,
+    )
+    assert backend.move[0][5] == pytest.approx(0.25)
+    assert backend.move[1] == pytest.approx(0.04)
+    assert backend.move[3] is False
 
 
 def test_trossen_versions_must_match_major_minor() -> None:

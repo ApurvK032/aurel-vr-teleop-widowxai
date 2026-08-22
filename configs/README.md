@@ -74,19 +74,50 @@ without first testing it in MuJoCo.
 - `cad_rest_commissioning.yaml` is the independent MuJoCo-only CAD/leader-arm
   experiment.
 - `cad_home_commissioning_mujoco.yaml` retains its legacy filename but now
-  previews the guarded 10% mapping and ±2° simulation phase from all-zero
-  rest, matching the printed leader's requested initial visualization. The
-  physical profile keeps its separate rest-to-home lifecycle.
+  previews the CAD mapping at 100% (one-for-one) joint scale from all-zero
+  rest, with zero simulation deadband and the official WidowXAI joint ranges.
+  A joint that tries to cross an official model boundary saturates there in
+  this viewer instead of latching every other joint. `S` and every stream,
+  mapping, model, or command fault return the viewer to all-zero rest; a fresh
+  `E` is required to restart. This file cannot open hardware. The physical
+  profile keeps its separate guarded 30% rest-anchored lifecycle with a ±60°
+  joint-0 envelope and ≤2° envelopes on pending joints 1–4, and remains
+  fail-closed at its envelope.
 - `cad_hardware_commissioning.yaml` is the guarded first physical CAD profile:
-  five tracked joints at 10% scale, ±2° about home, 15 seconds maximum, fixed
-  joint 5, disabled gripper, raw-stream watchdogs, adaptive source smoothing,
+  five tracked joints at 30% scale, ±60° on joint 0 and ≤2° on joints 1–4 about
+  all-zero rest, 15 seconds maximum, fixed
+  joint 5 locked to its measured session-start angle, a gripper that never
+  enters position mode or receives a command, fixed-output drift stops,
+  a 20 ms driver horizon, joint-0 limits of 0.25 rad/s and 1.0 rad/s²,
+  raw-stream watchdogs, adaptive source smoothing,
   workstation/network preflight, and candidate signs that require the explicit
   first-run acceptance flag. Pending live mapping additionally requires
   `--commission-joint 0` through `4`; every unselected follower joint is held
-  exactly at home. Live output also requires an explicitly selected Linux
-  evdev hold-to-run device that is polled every control iteration; a missing,
-  held, unsupported, or disconnected device fails closed. Follow
+  exactly at rest. `S`, a source/mapping fault, or any existing hardware safety
+  fault exits control and runs the guarded return to rest; hardware restart
+  always requires a new process and complete preflight.
+  Live output also requires an explicitly selected Linux evdev hold-to-run
+  device that is polled every control iteration; a missing, held, unsupported,
+  or disconnected device fails closed. Follow
   `docs/CAD_LEADER_TELEOP.md`; do not expand this evidence profile in place.
+  This is not a sub-35 ms profile: the latest physical trace measures about
+  215 ms tracker-arrival-to-encoder velocity-phase lag, mostly in the motion
+  limiter. Use `scripts/analyze_cad_latency.py` on every new run; the next
+  restarted M3T process also supplies D455 capture timestamps.
+- `cad_hardware_j012_experimental.yaml` is the explicitly selected physical
+  J0/J1/J2 follow-up profile. It restores the original candidate sign vector
+  `[+,+,-,-,-]`, uses the operator-requested 50% physical scaling, runs for at
+  most 20 seconds,
+  and accepts only `--commission-joints 0,1,2`. After all preflights and rest
+  stabilization it displays a three-second countdown and engages
+  automatically; live `S`/`Q` remains the immediate guarded return-to-rest.
+  Selected targets
+  saturate at the official WidowXAI model limits instead of ending the run
+  when the imperfect printed arm requests an unreachable pose. J3, J4, J5,
+  and the gripper stay fixed; inactive J3/J4 visual jumps are ignored. The
+  source freshness/restart gates, model limits, collision prediction, feedback
+  stop, rate limits, interactive stop terminal, and return to rest remain
+  mandatory.
 - `right_mirror_axis_validation_*`, `right_real_axis_validation_hardware.yaml`,
   and `temporary_*` preserve calibration experiments and are not normal run
   profiles.

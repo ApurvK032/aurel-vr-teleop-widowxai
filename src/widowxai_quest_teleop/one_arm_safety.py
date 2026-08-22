@@ -114,6 +114,81 @@ def screen_gripper_path(
     return float(minimum)
 
 
+def screen_self_collision_path(
+    single_model: WidowXAIModel,
+    *,
+    moving_side: str,
+    moving_start: np.ndarray,
+    moving_end: np.ndarray,
+    moving_gripper_m: float,
+    samples: int,
+    moving_end_gripper_m: float | None = None,
+    allow_marginal_start_m: float = 0.0,
+) -> None:
+    """Screen one arm, allowing only a proven clearing start artifact."""
+
+    if moving_side not in DUAL_ARM_SIDES:
+        raise ValueError(f"unknown moving side: {moving_side}")
+    if samples < 2:
+        raise ValueError("path screen requires at least two samples")
+    start = np.asarray(moving_start, dtype=float).reshape(6)
+    end = np.asarray(moving_end, dtype=float).reshape(6)
+    start_gripper = max(0.0, float(moving_gripper_m))
+    end_gripper = (
+        start_gripper
+        if moving_end_gripper_m is None
+        else max(0.0, float(moving_end_gripper_m))
+    )
+
+    start_contact, start_depth = _self_contact(single_model, start, start_gripper)
+    marginal = bool(start_contact and allow_marginal_start_m > 0.0)
+    if start_contact and not marginal:
+        raise HardwareSafetyError(
+            f"{moving_side} self-collision model rejects the path at 0.0%"
+        )
+    if marginal and start_depth > float(allow_marginal_start_m):
+        raise HardwareSafetyError(
+            f"{moving_side} measured start contact is {start_depth * 1000:.3f} mm, "
+            f"above the {float(allow_marginal_start_m) * 1000:.3f} mm marginal limit"
+        )
+
+    cleared_at: float | None = None
+    penetration_tolerance_m = 1e-6
+    for alpha in np.linspace(0.0, 1.0, samples):
+        q = start + alpha * (end - start)
+        gripper = start_gripper + alpha * (end_gripper - start_gripper)
+        contact, depth = _self_contact(single_model, q, gripper)
+        if not marginal:
+            if contact:
+                raise HardwareSafetyError(
+                    f"{moving_side} self-collision model rejects the path near "
+                    f"{alpha * 100:.1f}%"
+                )
+            continue
+        if contact and depth > start_depth + penetration_tolerance_m:
+            raise HardwareSafetyError(
+                f"{moving_side} path deepens the measured start contact near "
+                f"{alpha * 100:.1f}% ({depth * 1000:.3f} mm vs "
+                f"{start_depth * 1000:.3f} mm at rest)"
+            )
+        if not contact and cleared_at is None:
+            cleared_at = float(alpha)
+        elif contact and cleared_at is not None:
+            raise HardwareSafetyError(
+                f"{moving_side} path re-enters self-collision near {alpha * 100:.1f}%"
+            )
+
+    if marginal:
+        if cleared_at is None:
+            raise HardwareSafetyError(
+                f"{moving_side} measured start contact never clears along the path"
+            )
+        print(
+            f"  {moving_side}: measured {start_depth * 1000:.3f} mm start contact "
+            f"never deepens and clears by {cleared_at * 100:.1f}%"
+        )
+
+
 def screen_selected_path(
     single_model: WidowXAIModel,
     dual_model: DualArmCollisionModel,
@@ -150,44 +225,22 @@ def screen_selected_path(
         else max(0.0, float(moving_end_gripper_m))
     )
 
-    start_contact, start_depth = _self_contact(single_model, start, start_gripper)
-    marginal = bool(start_contact and allow_marginal_start_m > 0.0)
-    if start_contact and not marginal:
-        raise HardwareSafetyError(f"{moving_side} self-collision model rejects the path at 0.0%")
-    if marginal and start_depth > float(allow_marginal_start_m):
-        raise HardwareSafetyError(
-            f"{moving_side} measured start contact is {start_depth * 1000:.3f} mm, "
-            f"above the {float(allow_marginal_start_m) * 1000:.3f} mm marginal limit"
-        )
+    screen_self_collision_path(
+        single_model,
+        moving_side=moving_side,
+        moving_start=start,
+        moving_end=end,
+        moving_gripper_m=start_gripper,
+        moving_end_gripper_m=end_gripper,
+        samples=samples,
+        allow_marginal_start_m=allow_marginal_start_m,
+    )
 
-    cleared_at: float | None = None
-    penetration_tolerance_m = 1e-6
     minimum = np.inf
     minimum_alpha = 0.0
     for alpha in np.linspace(0.0, 1.0, samples):
         q = start + alpha * (end - start)
         gripper = start_gripper + alpha * (end_gripper - start_gripper)
-        contact, depth = _self_contact(single_model, q, gripper)
-        if not marginal:
-            if contact:
-                raise HardwareSafetyError(
-                    f"{moving_side} self-collision model rejects the path near "
-                    f"{alpha * 100:.1f}%"
-                )
-        else:
-            if contact and depth > start_depth + penetration_tolerance_m:
-                raise HardwareSafetyError(
-                    f"{moving_side} path deepens the measured start contact near "
-                    f"{alpha * 100:.1f}% ({depth * 1000:.3f} mm vs "
-                    f"{start_depth * 1000:.3f} mm at rest)"
-                )
-            if not contact and cleared_at is None:
-                cleared_at = float(alpha)
-            elif contact and cleared_at is not None:
-                raise HardwareSafetyError(
-                    f"{moving_side} path re-enters self-collision near {alpha * 100:.1f}%"
-                )
-
         separation = cross_arm_separation(
             dual_model,
             moving_side=moving_side,
@@ -201,15 +254,6 @@ def screen_selected_path(
             minimum = separation
             minimum_alpha = float(alpha)
 
-    if marginal:
-        if cleared_at is None:
-            raise HardwareSafetyError(
-                f"{moving_side} measured start contact never clears along the path"
-            )
-        print(
-            f"  {moving_side}: measured {start_depth * 1000:.3f} mm start contact "
-            f"never deepens and clears by {cleared_at * 100:.1f}%"
-        )
     if minimum < float(clearance_m):
         # cross_arm_separation normally raises first; retain this path-level
         # message if that implementation changes.

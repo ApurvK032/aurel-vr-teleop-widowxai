@@ -10,10 +10,12 @@ import numpy as np
 import pytest
 
 from scripts.run_cad_hardware import (
+    CadDeadmanConsole,
     make_cad_command_gate,
     require_initial_rest,
     require_released_hold_to_run,
     resolve_cad_duration,
+    validate_cad_fixed_feedback,
 )
 from scripts.run_cad_sim import SimulationDeadmanConsole
 from scripts.check_cad_stream import summarize_cad_samples
@@ -23,6 +25,7 @@ from widowxai_quest_teleop.cad_input import (
     CadSafetyError,
     CadJointSample,
     cad_live_confirmation_token,
+    require_cad_joint5_locked,
     rest_command_limits,
     validate_cad_commissioning_selection,
     validate_cad_hardware_config,
@@ -34,7 +37,9 @@ from widowxai_quest_teleop.telemetry import CAD_TELEMETRY_COLUMNS
 
 
 CONFIG_PATH = "configs/cad_hardware_commissioning.yaml"
+J012_CONFIG_PATH = "configs/cad_hardware_j012_experimental.yaml"
 HOME_Q = np.array([0.0, np.pi / 3.0, 5.0 * np.pi / 12.0, -np.pi / 3.0, 0.0, 0.0])
+REST_Q = np.zeros(6)
 
 
 def hardware_state(q: np.ndarray) -> HardwareState:
@@ -66,11 +71,32 @@ def test_cad_hardware_profile_is_narrow_pending_and_fail_closed() -> None:
     assert config["commissioning"]["mapping_status"] == CAD_MAPPING_PENDING
     assert config["commissioning"]["require_isolated_joint_while_pending"] is True
     assert config["hardware"]["control_gripper"] is False
+    assert config["hardware"]["fixed_joint_5_max_drift_rad"] == pytest.approx(0.005)
+    assert config["hardware"]["fixed_gripper_max_drift_m"] == pytest.approx(0.001)
+    assert config["hardware"]["startup_marginal_contact_m"] == pytest.approx(0.002)
     assert config["hardware"]["max_demo_duration_s"] == pytest.approx(15.0)
-    assert max(config["cad"]["scales"]) == pytest.approx(0.10)
-    assert np.max(np.abs(config["commissioning"]["maximum_delta_rad"][:5])) == pytest.approx(
-        np.deg2rad(2.0)
+    assert config["hardware"]["command_goal_time_s"] == pytest.approx(0.020)
+    assert config["hardware"]["feedback_tracking_delay_s"] == pytest.approx(0.020)
+    assert config["control"]["joint_command_limits"]["max_velocity"] == pytest.approx(
+        [0.25, 0.10, 0.10, 0.10, 0.10, 0.0001]
     )
+    assert config["control"]["joint_command_limits"]["max_acceleration"] == pytest.approx(
+        [1.00, 0.50, 0.50, 0.50, 0.50, 0.001]
+    )
+    assert config["model"]["command_anchor_q_rad"] == [0.0] * 6
+    assert max(config["cad"]["scales"]) == pytest.approx(0.30)
+    assert config["cad"]["source_deadband_rad"][0] == pytest.approx(0.03)
+    assert config["cad"]["signs"] == [1.0, 1.0, -1.0, -1.0, -1.0]
+    assert config["commissioning"]["minimum_delta_rad"][1:3] == [0.0, 0.0]
+    assert config["commissioning"]["minimum_delta_rad"][0] == pytest.approx(
+        -np.deg2rad(60.0)
+    )
+    assert config["commissioning"]["maximum_delta_rad"][0] == pytest.approx(
+        np.deg2rad(60.0)
+    )
+    assert np.max(
+        np.abs(config["commissioning"]["maximum_delta_rad"][1:5])
+    ) == pytest.approx(np.deg2rad(2.0))
     assert abs(config["commissioning"]["maximum_delta_rad"][5]) <= 1e-5
 
     simulation = load_config("configs/cad_home_commissioning_mujoco.yaml")
@@ -80,18 +106,101 @@ def test_cad_hardware_profile_is_narrow_pending_and_fail_closed() -> None:
     assert simulation["hardware"]["return_to_rest_on_exit"] is True
     assert simulation["model"]["rest_q_rad"] == config["model"]["rest_q_rad"]
     assert simulation["model"]["rest_q_rad"] == [0.0] * 6
+    assert simulation["cad"]["scales"] == [1.0] * 5
+    assert simulation["cad"]["source_deadband_rad"] == [0.0] * 5
+    assert config["cad"]["scales"] == [0.30] * 5
     for key in (
         "expected_names",
         "max_source_step_rad",
         "signs",
-        "scales",
-        "source_deadband_rad",
         "source_filter",
     ):
         assert simulation["cad"][key] == config["cad"][key]
-    for key in ("minimum_delta_rad", "maximum_delta_rad", "max_command_step_rad"):
-        assert simulation["commissioning"][key] == config["commissioning"][key]
-    assert simulation["control"] == config["control"]
+
+
+def test_cad_j012_profile_uses_model_saturation_and_locks_other_axes() -> None:
+    config = load_config(J012_CONFIG_PATH)
+    simulation = load_config("configs/cad_home_commissioning_mujoco.yaml")
+    validate_cad_hardware_config(config)
+
+    assert config["commissioning"]["profile"] == "j012_model_saturated"
+    assert config["commissioning"]["allowed_pending_joint_sets"] == [[0, 1, 2]]
+    assert config["commissioning"]["clip_to_command_limits"] is True
+    assert config["cad"]["signs"] == [1.0, 1.0, -1.0, -1.0, -1.0]
+    assert config["cad"]["scales"] == [0.50] * 5
+    assert config["hardware"]["robot_ip"] == "192.168.1.3"
+    assert config["hardware"]["max_demo_duration_s"] == pytest.approx(20.0)
+    assert config["hardware"]["activation"] == {
+        "mode": "automatic_after_rest",
+        "countdown_s": 3.0,
+    }
+    assert "hold_to_run" not in config["hardware"]
+    assert config["commissioning"]["maximum_delta_rad"][:3] == pytest.approx(
+        [3.05433, 3.14159, 2.35619]
+    )
+    assert np.max(
+        np.abs(config["commissioning"]["maximum_delta_rad"][3:])
+    ) <= 1e-5
+    assert simulation["commissioning"]["minimum_delta_rad"][:5] == pytest.approx(
+        [-3.05433, 0.0, 0.0, -1.5708, -1.5708]
+    )
+    assert simulation["commissioning"]["maximum_delta_rad"][:5] == pytest.approx(
+        [3.05433, 3.14159, 2.35619, 1.5708, 1.5708]
+    )
+    assert simulation["commissioning"]["max_command_step_rad"][:5] == pytest.approx(
+        [0.12] * 5
+    )
+    assert simulation["control"]["joint_command_limits"]["max_velocity"][:5] == pytest.approx(
+        [3.0] * 5
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda config: config["hardware"].__setitem__(
+                "max_demo_duration_s", 20.1
+            ),
+            "20 seconds",
+        ),
+        (
+            lambda config: config["hardware"]["activation"].__setitem__(
+                "countdown_s", 2.9
+            ),
+            "countdown",
+        ),
+        (
+            lambda config: config["hardware"].__setitem__(
+                "hold_to_run", {"enabled": False}
+            ),
+            "misleading",
+        ),
+        (
+            lambda config: config["cad"].__setitem__("scales", [0.51] * 5),
+            "0.50",
+        ),
+    ],
+)
+def test_cad_j012_profile_rejects_weakened_automatic_activation(
+    mutate,
+    message: str,
+) -> None:
+    config = deepcopy(load_config(J012_CONFIG_PATH))
+    mutate(config)
+    with pytest.raises(CadSafetyError, match=message):
+        validate_cad_hardware_config(config)
+
+
+def test_baseline_profile_cannot_enable_automatic_activation() -> None:
+    config = deepcopy(load_config(CONFIG_PATH))
+    del config["hardware"]["hold_to_run"]
+    config["hardware"]["activation"] = {
+        "mode": "automatic_after_rest",
+        "countdown_s": 3.0,
+    }
+    with pytest.raises(CadSafetyError, match="only for the J0/J1/J2"):
+        validate_cad_hardware_config(config)
 
 
 @pytest.mark.parametrize(
@@ -101,9 +210,19 @@ def test_cad_hardware_profile_is_narrow_pending_and_fail_closed() -> None:
         ("hardware", "require_explicit_enable", False, "require_explicit_enable"),
         ("hardware", "max_demo_duration_s", 16.0, "15 seconds"),
         ("hardware", "max_feedback_error_rad", 0.081, "0.08"),
+        ("hardware", "fixed_joint_5_max_drift_rad", 0.006, "joint 5 drift"),
+        ("hardware", "fixed_gripper_max_drift_m", 0.002, "gripper drift"),
+        ("hardware", "startup_marginal_contact_m", 0.0021, "marginal contact"),
+        ("hardware", "command_goal_time_s", 0.019, "20-30 ms"),
         ("cad", "require_root_locked", False, "root_locked"),
-        ("cad", "scales", [0.11] * 5, "scales"),
+        ("cad", "scales", [0.31] * 5, "scales"),
         ("cad", "source_filter", {"enabled": False}, "source_filter"),
+        (
+            "commissioning",
+            "maximum_delta_rad",
+            [1.049, 0.0349065850, 0.0349065850, 0.0349065850, 0.0349065850, 0.000001],
+            "sixty/two-degree",
+        ),
         (
             "commissioning",
             "require_isolated_joint_while_pending",
@@ -112,6 +231,16 @@ def test_cad_hardware_profile_is_narrow_pending_and_fail_closed() -> None:
         ),
         ("hardware", "hold_to_run", {"enabled": False}, "hold_to_run.enabled"),
         ("control", "loop_rate_hz", 101.0, "100 Hz"),
+        (
+            "control",
+            "joint_command_limits",
+            {
+                "enabled": True,
+                "max_velocity": [0.251, 0.10, 0.10, 0.10, 0.10, 0.0001],
+                "max_acceleration": [1.001, 0.50, 0.50, 0.50, 0.50, 0.001],
+            },
+            "joint-specific limits",
+        ),
     ],
 )
 def test_cad_hardware_profile_rejects_weakened_gates(
@@ -203,7 +332,21 @@ def test_pending_live_mapping_requires_exactly_one_commissioning_joint() -> None
         mapping_status=CAD_MAPPING_PENDING,
         accept_unvalidated_mapping=True,
         commission_joint=2,
-    ) == 2
+    ) == (2,)
+    with pytest.raises(CadSafetyError, match="not allowed"):
+        validate_cad_commissioning_selection(
+            live=True,
+            mapping_status=CAD_MAPPING_PENDING,
+            accept_unvalidated_mapping=True,
+            commission_joints="0,1,2",
+        )
+    assert validate_cad_commissioning_selection(
+        live=True,
+        mapping_status=CAD_MAPPING_PENDING,
+        accept_unvalidated_mapping=True,
+        commission_joints="0,1,2",
+        allowed_pending_joint_sets=[[0, 1, 2]],
+    ) == (0, 1, 2)
     assert validate_cad_commissioning_selection(
         live=False,
         mapping_status=CAD_MAPPING_PENDING,
@@ -218,36 +361,96 @@ def test_pending_live_mapping_requires_exactly_one_commissioning_joint() -> None
     ) is None
 
 
-def test_cad_start_requires_rest_and_command_gate_anchors_to_home() -> None:
+def test_cad_start_and_command_gate_anchor_to_all_zero_rest() -> None:
     rest = np.zeros(6)
     require_initial_rest(hardware_state(np.full(6, 0.01)), rest, 0.08)
     with pytest.raises(HardwareSafetyError, match="all-zero rest"):
         require_initial_rest(hardware_state(np.array([0.0, 0.081, 0.0, 0.0, 0.0, 0.0])), rest, 0.08)
 
-    state = hardware_state(HOME_Q + 0.005)
+    state = hardware_state(REST_Q + 0.005)
     config = load_config(CONFIG_PATH)
     limits = rest_command_limits(
         state.joint_limits[:6],
-        HOME_Q,
+        REST_Q,
         np.asarray(config["commissioning"]["minimum_delta_rad"]),
         np.asarray(config["commissioning"]["maximum_delta_rad"]),
     )
     gate = make_cad_command_gate(
         state,
-        HOME_Q,
+        REST_Q,
         limits,
         np.asarray(config["commissioning"]["max_command_step_rad"]),
     )
-    # Feedback may lag home by more than one per-tick cap; the gate tracks the
-    # last commanded home pose, not delayed encoder feedback.
-    gate.validate(HOME_Q, state.gripper_position_m)
+    # Feedback may lag rest by more than one per-tick cap; the gate tracks the
+    # last commanded rest pose, not delayed encoder feedback.
+    gate.validate(REST_Q, state.gripper_position_m)
     with pytest.raises(HardwareSafetyError, match="per-tick"):
-        gate.validate(HOME_Q + np.array([0.004, 0, 0, 0, 0, 0]), 0.0)
+        gate.validate(REST_Q + np.array([0.004, 0, 0, 0, 0, 0]), 0.0)
+
+
+def test_cad_joint5_and_gripper_session_locks_fail_closed() -> None:
+    locked_q5 = 0.012
+    locked_gripper = 0.021
+    command = HOME_Q.copy()
+    command[5] = locked_q5
+    require_cad_joint5_locked(command, locked_q5)
+    with pytest.raises(CadSafetyError, match="joint 5 command changed"):
+        changed = command.copy()
+        changed[5] += 1e-6
+        require_cad_joint5_locked(changed, locked_q5)
+
+    state = hardware_state(command)
+    state = HardwareState(
+        state.q_arm,
+        locked_gripper,
+        state.joint_limits,
+        state.firmware_version,
+        state.driver_version,
+        state.position_tolerances,
+    )
+    validate_cad_fixed_feedback(
+        state,
+        locked_joint5_rad=locked_q5,
+        locked_gripper_m=locked_gripper,
+        max_joint5_drift_rad=0.005,
+        max_gripper_drift_m=0.001,
+    )
+    with pytest.raises(HardwareSafetyError, match="joint 5 drifted"):
+        drifted_q = command.copy()
+        drifted_q[5] += 0.0051
+        validate_cad_fixed_feedback(
+            hardware_state(drifted_q),
+            locked_joint5_rad=locked_q5,
+            locked_gripper_m=0.0,
+            max_joint5_drift_rad=0.005,
+            max_gripper_drift_m=0.001,
+        )
+    with pytest.raises(HardwareSafetyError, match="gripper drifted"):
+        drifted_gripper = HardwareState(
+            command,
+            locked_gripper + 0.0011,
+            state.joint_limits,
+            state.firmware_version,
+            state.driver_version,
+            state.position_tolerances,
+        )
+        validate_cad_fixed_feedback(
+            drifted_gripper,
+            locked_joint5_rad=locked_q5,
+            locked_gripper_m=locked_gripper,
+            max_joint5_drift_rad=0.005,
+            max_gripper_drift_m=0.001,
+        )
 
 
 def test_cad_telemetry_declares_source_command_and_feedback_evidence() -> None:
     required = {
         "cad_sequence",
+        "cad_frame_time_ns",
+        "cad_capture_to_publish_ms",
+        "cad_publish_to_arrival_ms",
+        "cad_frame_to_arrival_ms",
+        "cad_arrival_monotonic_ns",
         "cad_root_locked",
         "receiver_invalid_packets",
         "deadman_needs_release",
@@ -313,7 +516,20 @@ def test_cad_sim_viewer_keys_control_the_simulation_deadman() -> None:
     console.handle_viewer_key(ord("R"))
     assert not console.pressed
     assert console.release_generation == 1
+    console.handle_viewer_key(ord("S"))
+    assert not console.pressed
+    assert console.consume_stop_request()
+    assert not console.consume_stop_request()
     console.handle_viewer_key(ord("Q"))
+    assert console.quit_requested
+
+
+@pytest.mark.parametrize("latch_enabled", [False, True])
+def test_cad_hardware_s_requests_guarded_return_and_exit(latch_enabled: bool) -> None:
+    console = CadDeadmanConsole(latch_enabled=latch_enabled)
+    console.set_pressed(True)
+    console.handle_command("S")
+    assert not console.pressed
     assert console.quit_requested
 
 
@@ -366,7 +582,7 @@ def test_pending_live_cli_cannot_bypass_isolated_joint_selection() -> None:
         check=False,
     )
     assert result.returncode != 0
-    assert "pending CAD mapping can move only one follower joint" in (
+    assert "requires --commission-joint or --commission-joints" in (
         result.stdout + result.stderr
     )
     assert "workstation preflight" not in (result.stdout + result.stderr)

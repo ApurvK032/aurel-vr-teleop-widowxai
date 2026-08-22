@@ -4,10 +4,10 @@ project:
 
 model:
   xml_path: third_party/trossen_arm_mujoco/trossen_arm_mujoco/assets/wxai/wxai_follower.xml
-  # The controller must be at all-zero rest before the driver is enabled. It
-  # then follows the proven two-second rest -> home lifecycle.
+  # The controller and printed leader both start at all-zero rest. Physical
+  # commands are relative to this pose; there is no intermediate home pose.
   rest_q_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  command_anchor_q_rad: [0.0, 1.0471975512, 1.3089969390, -1.0471975512, 0.0, 0.0]
+  command_anchor_q_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 cad:
   udp_host: 127.0.0.1
@@ -19,12 +19,17 @@ cad:
   max_packet_age_s: 0.100
   max_future_skew_s: 0.050
   max_source_step_rad: [0.12, 0.12, 0.12, 0.12, 0.12]
-  # Candidate signs from the CAD-to-MuJoCo direction check. They are
-  # intentionally marked pending below and require five isolated physical
-  # direction checks before this profile can be promoted.
+  # Candidate signs remain pending physical validation. Joint 1 retains the
+  # original positive mapping; earlier boundary stops were caused by the
+  # imperfect printed arm asking for follower poses below its model limit.
   signs: [1.0, 1.0, -1.0, -1.0, -1.0]
-  scales: [0.10, 0.10, 0.10, 0.10, 0.10]
-  source_deadband_rad: [0.15, 0.02, 0.01, 0.025, 0.15]
+  # Operator-requested commissioning response. Pending mapping remains one
+  # joint at a time; only joint 0 has the separately requested ±60° envelope.
+  scales: [0.30, 0.30, 0.30, 0.30, 0.30]
+  # Joint 0 uses 0.03 rad: over six times the 0.00473 rad maximum filtered
+  # stationary deviation measured in the first physical rest-anchored run,
+  # while avoiding the previous 0.15 rad (8.6 degree) response delay.
+  source_deadband_rad: [0.03, 0.02, 0.01, 0.025, 0.15]
   # Suppress stationary visual jitter without delaying deliberate motion.
   # The raw stream still drives jump and freshness checks.
   source_filter:
@@ -39,18 +44,23 @@ commissioning:
   # Pending signs may be exercised only through --commission-joint. The live
   # launcher rejects an all-axis command phase until mapping is accepted.
   require_isolated_joint_while_pending: true
-  # At most two degrees about the normal WidowX home pose. Joint 5 is not
-  # observed by the leader and is held at home with a numerical-only envelope.
-  minimum_delta_rad: [-0.0349065850, -0.0349065850, -0.0349065850, -0.0349065850, -0.0349065850, -0.000001]
-  maximum_delta_rad: [0.0349065850, 0.0349065850, 0.0349065850, 0.0349065850, 0.0349065850, 0.000001]
+  # Joint 0 is permitted ±60° about all-zero rest by explicit operator request.
+  # Unvalidated joints 1-4 remain within two degrees. Joints 1 and 2 already
+  # sit at their official lower limits, so their first tests permit only
+  # positive travel. Joint 5 remains locked to its measured session-start pose.
+  minimum_delta_rad: [-1.0471975512, 0.0, 0.0, -0.0349065850, -0.0349065850, -0.000001]
+  maximum_delta_rad: [1.0471975512, 0.0349065850, 0.0349065850, 0.0349065850, 0.0349065850, 0.000001]
   max_command_step_rad: [0.003, 0.003, 0.003, 0.003, 0.003, 0.000002]
 
 control:
   loop_rate_hz: 90
   joint_command_limits:
     enabled: true
-    max_velocity: [0.10, 0.10, 0.10, 0.10, 0.10, 0.0001]
-    max_acceleration: [0.50, 0.50, 0.50, 0.50, 0.50, 0.001]
+    # Joint 0 was the measured response bottleneck: the previous 0.10 rad/s cap
+    # was active through most of the physical run while feedback tracked the
+    # limited command within 0.00134 rad. Pending joints retain their old caps.
+    max_velocity: [0.25, 0.10, 0.10, 0.10, 0.10, 0.0001]
+    max_acceleration: [1.00, 0.50, 0.50, 0.50, 0.50, 0.001]
 
 hardware:
   enabled: true
@@ -65,7 +75,7 @@ hardware:
     require_direct_route: true
   end_effector_profile: legacy_1_8
   driver_version_tested: 1.8.6
-  command_goal_time_s: 0.025
+  command_goal_time_s: 0.020
   arm_velocity_feedforward:
     enabled: false
   control_gripper: false
@@ -85,9 +95,18 @@ hardware:
   startup_ramp_rate_hz: 120
   startup_max_joint_delta_rad: [0.006, 0.006, 0.006, 0.006, 0.006, 0.006]
   startup_collision_samples: 501
+  # The right arm's measured gravity-rest offset produces a known 0.263-0.359
+  # mm model overlap that clears at the first 0.2% sample toward home. The
+  # shared proven screen rejects deeper, non-clearing, or re-entering contact.
+  startup_marginal_contact_m: 0.002
   max_feedback_error_rad: 0.08
-  feedback_tracking_delay_s: 0.025
+  feedback_tracking_delay_s: 0.020
   feedback_check_rate_hz: 50
+  # Joint 5 and the gripper are not part of this demo. Their measured startup
+  # positions are session locks: neither receives a motion command, and excess
+  # physical drift stops the run.
+  fixed_joint_5_max_drift_rad: 0.005
+  fixed_gripper_max_drift_m: 0.001
   # Gripper output is disabled; this is used only by the shared startup gate
   # to accept the unchanged measured gripper value.
   max_gripper_delta_m: 0.044

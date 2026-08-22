@@ -346,7 +346,33 @@ def resolve_demo_duration(hardware: dict, requested_duration_s: float) -> float:
     return min(requested, duration_limit)
 
 
-def ramp_to_home(backend, gate: CommandGate, start, home_q: np.ndarray, config: dict) -> None:
+def apply_locked_arm_joints(
+    q_arm: np.ndarray,
+    locked_arm_joints: dict[int, float] | None,
+) -> np.ndarray:
+    """Return an arm target with explicitly locked joints restored."""
+
+    target = np.asarray(q_arm, dtype=float).reshape(6).copy()
+    for raw_index, raw_value in (locked_arm_joints or {}).items():
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+            raise HardwareSafetyError("locked arm joint index must be an integer")
+        index = int(raw_index)
+        value = float(raw_value)
+        if not 0 <= index < 6 or not np.isfinite(value):
+            raise HardwareSafetyError("locked arm joint target is invalid")
+        target[index] = value
+    return target
+
+
+def ramp_to_home(
+    backend,
+    gate: CommandGate,
+    start,
+    home_q: np.ndarray,
+    config: dict,
+    *,
+    locked_arm_joints: dict[int, float] | None = None,
+) -> None:
     """Move J0-J5 to home while leaving the physical gripper untouched."""
 
     hardware = config["hardware"]
@@ -355,12 +381,14 @@ def ramp_to_home(backend, gate: CommandGate, start, home_q: np.ndarray, config: 
     steps = max(1, round(duration * rate))
     period = 1.0 / rate
     feedback_stride = max(1, round(rate / float(hardware["feedback_check_rate_hz"])))
-    start_q = start.q_arm.copy()
+    start_q = apply_locked_arm_joints(start.q_arm, locked_arm_joints)
+    home_q = apply_locked_arm_joints(home_q, locked_arm_joints)
     start_gripper = float(start.gripper_position_m)
     next_tick = time.perf_counter()
     for index in range(1, steps + 1):
         alpha = index / steps
         q = start_q + alpha * (home_q - start_q)
+        q = apply_locked_arm_joints(q, locked_arm_joints)
         gate.validate(q, start_gripper)
         backend.send_positions(q, start_gripper, include_gripper=False)
         if index % feedback_stride == 0 or index == steps:
@@ -508,13 +536,22 @@ def return_to_rest(
     config: dict,
     *,
     control_gripper: bool,
+    locked_arm_joints: dict[int, float] | None = None,
+    locked_gripper_position_m: float | None = None,
 ) -> None:
     """Validate and execute the previous stack's blocking sleep transition."""
 
     hardware = config["hardware"]
     state = backend.read_state()
-    rest_q = np.asarray(hardware.get("rest_q_rad", np.zeros(6)), dtype=float).reshape(6)
+    rest_q = apply_locked_arm_joints(
+        np.asarray(hardware.get("rest_q_rad", np.zeros(6)), dtype=float).reshape(6),
+        locked_arm_joints,
+    )
     rest_gripper = float(hardware.get("rest_gripper_m", 0.0))
+    if not control_gripper and locked_gripper_position_m is not None:
+        rest_gripper = float(locked_gripper_position_m)
+        if not np.isfinite(rest_gripper):
+            raise HardwareSafetyError("locked gripper position must be finite")
     tolerances = np.asarray(state.position_tolerances, dtype=float).reshape(7)
     lower = state.joint_limits[:, 0] - tolerances
     upper = state.joint_limits[:, 1] + tolerances
@@ -553,7 +590,8 @@ def return_to_rest(
 
     duration = float(hardware.get("shutdown_move_duration_s", 2.0))
     print(
-        f"shutdown: returning arm to rest [0, 0, 0, 0, 0, 0] deg "
+        "shutdown: returning arm to configured rest "
+        f"q_deg={np.round(np.rad2deg(rest_q), 4).tolist()} "
         f"with a {duration:g} s blocking move"
     )
     backend.move_to_rest(

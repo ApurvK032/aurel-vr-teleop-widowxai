@@ -1,5 +1,5 @@
 project:
-  name: widowxai-cad-rest-commissioning-mujoco
+  name: widowxai-cad-full-scale-mujoco
   mode: cad_joint_relative_mujoco_only
 
 model:
@@ -21,8 +21,12 @@ cad:
   max_future_skew_s: 0.050
   max_source_step_rad: [0.12, 0.12, 0.12, 0.12, 0.12]
   signs: [1.0, 1.0, -1.0, -1.0, -1.0]
-  scales: [0.10, 0.10, 0.10, 0.10, 0.10]
-  source_deadband_rad: [0.15, 0.02, 0.01, 0.025, 0.15]
+  # MuJoCo is a diagnostic viewer, so leader motion is reproduced one-for-one.
+  # The physical-arm profiles remain independently capped at 30% scale.
+  scales: [1.00, 1.00, 1.00, 1.00, 1.00]
+  # The adaptive source filter remains enabled, but the simulation deliberately
+  # has no commissioning deadband so small deliberate motions are visible.
+  source_deadband_rad: [0.0, 0.0, 0.0, 0.0, 0.0]
   source_filter:
     enabled: true
     minimum_cutoff_hz: 2.0
@@ -31,17 +35,22 @@ cad:
     maximum_cutoff_hz: 20.0
 
 commissioning:
-  minimum_delta_rad: [-0.0349065850, -0.0349065850, -0.0349065850, -0.0349065850, -0.0349065850, -0.000001]
-  maximum_delta_rad: [0.0349065850, 0.0349065850, 0.0349065850, 0.0349065850, 0.0349065850, 0.000001]
-  max_command_step_rad: [0.003, 0.003, 0.003, 0.003, 0.003, 0.000002]
+  # Allow the 100% preview to use the official WidowXAI joint ranges. J1 and
+  # J2 start at their official lower limits in the requested all-zero pose.
+  # Untracked joint 5 remains fixed at zero.
+  minimum_delta_rad: [-3.05433, 0.0, 0.0, -1.5708, -1.5708, -0.000001]
+  maximum_delta_rad: [3.05433, 3.14159, 2.35619, 1.5708, 1.5708, 0.000001]
+  max_command_step_rad: [0.12, 0.12, 0.12, 0.12, 0.12, 0.000002]
   return_to_rest_timeout_s: 3.0
 
 control:
   loop_rate_hz: 90
   joint_command_limits:
     enabled: true
-    max_velocity: [0.10, 0.10, 0.10, 0.10, 0.10, 0.0001]
-    max_acceleration: [0.50, 0.50, 0.50, 0.50, 0.50, 0.001]
+    # Match the accepted raw-source watchdog ceiling (0.12 rad per ~25 Hz
+    # tracker frame) so the viewer follows instead of crawling behind it.
+    max_velocity: [3.0, 3.0, 3.0, 3.0, 3.0, 0.0001]
+    max_acceleration: [30.0, 30.0, 30.0, 30.0, 30.0, 0.001]
 
 telemetry:
   output_dir: runs

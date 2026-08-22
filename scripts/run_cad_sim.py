@@ -16,7 +16,8 @@ from widowxai_quest_teleop.cad_input import (
     CadRestMapper,
     CadSafetyError,
     CadUdpReceiver,
-    cad_commission_joint_index,
+    cad_commission_joint_indices,
+    require_cad_joint5_locked,
     rest_command_limits,
 )
 from widowxai_quest_teleop.config import load_config
@@ -32,6 +33,7 @@ class SimulationDeadmanConsole:
 
     def __init__(self) -> None:
         self._pressed = False
+        self._stop = False
         self._quit = False
         self._interactive = False
         self.press_generation = 0
@@ -44,6 +46,11 @@ class SimulationDeadmanConsole:
     @property
     def quit_requested(self) -> bool:
         return self._quit
+
+    def consume_stop_request(self) -> bool:
+        requested = self._stop
+        self._stop = False
+        return requested
 
     def set_pressed(self, value: bool) -> None:
         pressed = bool(value)
@@ -65,10 +72,17 @@ class SimulationDeadmanConsole:
 
         if keycode == ord("E"):
             self.set_pressed(True)
-            print("SIM deadman ENGAGED from MuJoCo window; press R to release")
+            print(
+                "SIM deadman ENGAGED from MuJoCo window; "
+                "press R to hold or S to return to rest"
+            )
         elif keycode == ord("R"):
             self.set_pressed(False)
             print("SIM deadman released from MuJoCo window")
+        elif keycode == ord("S"):
+            self.set_pressed(False)
+            self._stop = True
+            print("SIM stop requested; returning to all-zero rest")
         elif keycode == ord("Q"):
             self.set_pressed(False)
             self._quit = True
@@ -82,15 +96,19 @@ class SimulationDeadmanConsole:
         command = sys.stdin.readline().strip().lower()
         if command in ("e", "engage"):
             self.set_pressed(True)
-            print("SIM deadman ENGAGED; type 'r' + Enter to release")
+            print("SIM deadman ENGAGED; type r to hold or s to return to rest")
         elif command in ("r", "release"):
             self.set_pressed(False)
             print("SIM deadman released")
+        elif command in ("s", "stop"):
+            self.set_pressed(False)
+            self._stop = True
+            print("SIM stop requested; returning to all-zero rest")
         elif command in ("q", "quit", ""):
             self.set_pressed(False)
             self._quit = True
         else:
-            print("simulation commands: e=engage, r=release, q=quit")
+            print("simulation commands: e=engage, r=release, s=rest, q=quit")
 
 
 def make_command_gate(
@@ -171,18 +189,23 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--label", default="cad-rest-mujoco")
     parser.add_argument("--no-telemetry", action="store_true")
-    parser.add_argument(
+    selection_group = parser.add_mutually_exclusive_group()
+    selection_group.add_argument(
         "--commission-joint",
         type=int,
         choices=range(5),
         help="preview only one follower joint (0-4), matching physical sign commissioning",
     )
+    selection_group.add_argument(
+        "--commission-joints",
+        help="preview comma-separated follower joints, for example 0,1,2",
+    )
     parser.add_argument(
         "--simulation-auto-deadman",
         action="store_true",
         help=(
-            "simulation smoke tests only: engage once after the first fresh packet; "
-            "it remains fail-closed after any stale/discontinuity"
+            "simulation smoke tests only: press E once after the initial three "
+            "fresh packets; faults still return to rest and require manual E"
         ),
     )
     args = parser.parse_args()
@@ -195,7 +218,11 @@ def main() -> None:
     if not np.isfinite(args.duration) or args.duration < 0.0:
         raise SystemExit("--duration must be finite and nonnegative")
     try:
-        commission_joint = cad_commission_joint_index(args.commission_joint)
+        commission_joints = cad_commission_joint_indices(
+            args.commission_joint
+            if args.commission_joints is None
+            else args.commission_joints
+        )
     except CadSafetyError as exc:
         raise SystemExit(f"CAD COMMISSIONING SELECTION REJECTED: {exc}") from None
 
@@ -218,7 +245,11 @@ def main() -> None:
         signs=np.asarray(config["cad"]["signs"], dtype=float),
         scales=np.asarray(config["cad"]["scales"], dtype=float),
         source_deadband_rad=np.asarray(config["cad"]["source_deadband_rad"], dtype=float),
-        commission_joint=commission_joint,
+        commission_joints=commission_joints,
+        # The requested all-zero pose places J1/J2 exactly at their lower
+        # model limits. Simulation saturates individual boundary violations so
+        # tracker noise cannot latch the complete five-joint preview.
+        clip_to_command_limits=True,
         command_limits=command_limits,
     )
     controller = CadDeadmanController(mapper)
@@ -226,6 +257,7 @@ def main() -> None:
         config["cad"]["stale_timeout_s"],
         config["cad"]["fresh_samples_to_recover"],
         np.asarray(config["cad"]["max_source_step_rad"], dtype=float),
+        monitored_joints=commission_joints,
     )
     source_filter_config = config["cad"]["source_filter"]
     if source_filter_config.get("enabled") is not True:
@@ -280,19 +312,25 @@ def main() -> None:
         "mapping selection: "
         + (
             "all five mapped joints"
-            if commission_joint is None
+            if commission_joints is None
             else (
-                f"ONLY follower joint {commission_joint} from "
-                f"{config['cad']['expected_names'][commission_joint]}"
+                "ONLY follower joints "
+                + ", ".join(
+                    f"{joint} ({config['cad']['expected_names'][joint]})"
+                    for joint in commission_joints
+                )
             )
         )
     )
     if args.simulation_auto_deadman:
-        print("simulation auto-deadman will engage once after three fresh packets")
+        print(
+            "simulation auto-deadman will press E once after the initial three "
+            "fresh packets; it will not re-arm after a fault"
+        )
     else:
         print(
-            "simulation commands: click MuJoCo and press E/R/Q, or use "
-            "e/r/q + Enter in this terminal"
+            "simulation commands: click MuJoCo and press E/R/S/Q, or use "
+            "e/r/s/q + Enter in this terminal"
         )
 
     telemetry = None
@@ -317,11 +355,52 @@ def main() -> None:
     previous_tick = started
     next_tick = started
     last_log = started
-    auto_deadman_engaged = False
-    last_event = "startup_at_rest"
+    auto_start_pending = bool(args.simulation_auto_deadman)
+    rest_hold = True
+    rest_reason = "startup"
+    observed_invalid_packets = receiver.invalid_packets
+    restart_valid_packet_threshold = 0
+    last_event = "rest_hold:startup"
+
+    def enter_rest_hold(reason: str) -> None:
+        """Return safely to zero and require a new explicit E edge."""
+
+        nonlocal q_command, q_des, rest_hold, rest_reason, last_event
+        nonlocal previous_tick, next_tick, auto_start_pending
+        console.set_pressed(False)
+        controller.update(
+            deadman_pressed=False,
+            stream_fresh=False,
+            sample=last_filtered_sample,
+            robot_q=q_command,
+        )
+        q_command = return_simulation_to_rest(
+            model=model,
+            sim_data=sim_data,
+            viewer=viewer,
+            limiter=limiter,
+            gate=gate,
+            q_command=q_command,
+            rest_q=rest_q,
+            gripper_q=gripper_q,
+            loop_rate_hz=loop_hz,
+            timeout_s=float(commissioning["return_to_rest_timeout_s"]),
+        )
+        q_des = rest_q.copy()
+        limiter.reset(q_command)
+        rest_hold = True
+        rest_reason = str(reason)
+        last_event = f"rest_hold:{rest_reason}"
+        # Automated startup is intentionally one-shot. An issue must never
+        # cause unattended motion to resume.
+        auto_start_pending = False
+        previous_tick = time.perf_counter()
+        next_tick = previous_tick
+        print(f"REST HOLD: {rest_reason}; press E to restart from all-zero rest")
 
     try:
         receiver.start()
+        print("REST HOLD: startup; press E to start from all-zero rest")
         while args.duration <= 0.0 or time.perf_counter() - started < args.duration:
             console.poll()
             if console.quit_requested:
@@ -345,32 +424,110 @@ def main() -> None:
                 )
                 last_filtered_sample = replace(sample, q=filtered_q)
 
-            if args.simulation_auto_deadman:
-                if freshness.fresh and not auto_deadman_engaged:
-                    console.set_pressed(True)
-                    auto_deadman_engaged = True
-                deadman_pressed = console.pressed
-            else:
-                deadman_pressed = console.pressed
+            stop_requested = console.consume_stop_request()
+            new_invalid_packet = receiver.invalid_packets > observed_invalid_packets
+            observed_invalid_packets = receiver.invalid_packets
 
-            try:
-                target = controller.update(
-                    deadman_pressed=deadman_pressed,
-                    stream_fresh=freshness.fresh,
-                    sample=last_filtered_sample,
-                    robot_q=q_command,
+            target = None
+            if rest_hold:
+                if stop_requested:
+                    console.set_pressed(False)
+                    auto_start_pending = False
+                    rest_reason = "operator_stop"
+                    last_event = "rest_hold:operator_stop"
+                    print("REST HOLD: operator_stop; press E to restart from all-zero rest")
+                if new_invalid_packet:
+                    console.set_pressed(False)
+                    auto_start_pending = False
+                    restart_valid_packet_threshold = (
+                        receiver.valid_packets
+                        + int(config["cad"]["fresh_samples_to_recover"])
+                    )
+                    rest_reason = (
+                        "receiver_invalid_packet:"
+                        + (receiver.last_error or "unknown packet validation error")
+                    )
+                    last_event = f"rest_hold:{rest_reason}"
+                    print(
+                        f"REST HOLD: {rest_reason}; waiting for fresh packets, "
+                        "then press E"
+                    )
+                source_ready = (
+                    freshness.fresh
+                    and last_filtered_sample is not None
+                    and receiver.valid_packets >= restart_valid_packet_threshold
                 )
-                last_event = ""
-            except CadSafetyError as exc:
-                target = None
-                last_event = f"mapping_fault:{exc}"
-                print(f"CAD SAFETY HOLD: {exc}; release and re-engage the simulation deadman")
+                if console.pressed and not source_ready:
+                    console.set_pressed(False)
+                    print("SIM E rejected: source is not ready; wait for fresh packets")
+                if (
+                    auto_start_pending
+                    and source_ready
+                ):
+                    console.set_pressed(True)
+                    auto_start_pending = False
+                if console.pressed and source_ready:
+                    try:
+                        target = controller.update(
+                            deadman_pressed=True,
+                            stream_fresh=True,
+                            sample=last_filtered_sample,
+                            robot_q=rest_q,
+                        )
+                    except CadSafetyError as exc:
+                        enter_rest_hold(f"mapping_fault:{exc}")
+                    else:
+                        if target is not None:
+                            rest_hold = False
+                            rest_reason = ""
+                            last_event = "started_from_rest"
+                            print("SIM RUNNING: anchored at all-zero rest")
+                else:
+                    controller.update(
+                        deadman_pressed=False,
+                        stream_fresh=freshness.fresh,
+                        sample=last_filtered_sample,
+                        robot_q=rest_q,
+                    )
+            else:
+                fault_reason = ""
+                if stop_requested:
+                    fault_reason = "operator_stop"
+                elif new_invalid_packet:
+                    restart_valid_packet_threshold = (
+                        receiver.valid_packets
+                        + int(config["cad"]["fresh_samples_to_recover"])
+                    )
+                    fault_reason = (
+                        "receiver_invalid_packet:"
+                        + (receiver.last_error or "unknown packet validation error")
+                    )
+                elif not freshness.fresh:
+                    fault_reason = (
+                        "source_" + (freshness.last_discontinuity or "not_fresh")
+                    )
+
+                if fault_reason:
+                    enter_rest_hold(fault_reason)
+                else:
+                    try:
+                        target = controller.update(
+                            deadman_pressed=console.pressed,
+                            stream_fresh=True,
+                            sample=last_filtered_sample,
+                            robot_q=q_command,
+                        )
+                        last_event = ""
+                    except CadSafetyError as exc:
+                        enter_rest_hold(f"mapping_fault:{exc}")
+
+            deadman_pressed = console.pressed
 
             now = time.perf_counter()
             dt = max(1e-6, now - previous_tick)
             previous_tick = now
             limiter_flags: list[str] = []
-            if target is None:
+            if rest_hold or target is None:
                 q_des = q_command.copy()
                 limiter.reset(q_command)
                 candidate = q_command.copy()
@@ -380,17 +537,15 @@ def main() -> None:
                 candidate = result.command
                 limiter_flags = result.flags("joint")
 
-            try:
-                if model.in_self_collision(candidate, gripper_q):
-                    raise CadSafetyError("official model predicts a self-collision")
-                gate.validate(candidate, gripper_q)
-                q_command = candidate
-            except (CadSafetyError, HardwareSafetyError) as exc:
-                controller.fault(deadman_pressed)
-                limiter.reset(q_command)
-                q_des = q_command.copy()
-                last_event = f"command_fault:{exc}"
-                print(f"CAD SAFETY HOLD: {exc}; release and re-engage the simulation deadman")
+            if not rest_hold:
+                try:
+                    require_cad_joint5_locked(candidate, rest_q[5])
+                    if model.in_self_collision(candidate, gripper_q):
+                        raise CadSafetyError("official model predicts a self-collision")
+                    gate.validate(candidate, gripper_q)
+                    q_command = candidate
+                except (CadSafetyError, HardwareSafetyError) as exc:
+                    enter_rest_hold(f"command_fault:{exc}")
 
             model.set_viewer_qpos(sim_data, q_command, gripper_q)
             if viewer is not None:
@@ -412,6 +567,51 @@ def main() -> None:
                     pc_monotonic_ns=time.perf_counter_ns(),
                     cad_sequence="" if last_sample is None else last_sample.sequence,
                     cad_source_time_ns="" if last_sample is None else last_sample.source_time_ns,
+                    cad_frame_time_ns=(
+                        ""
+                        if last_sample is None or last_sample.frame_time_ns is None
+                        else last_sample.frame_time_ns
+                    ),
+                    cad_frame_timestamp_domain=(
+                        "" if last_sample is None else last_sample.frame_time_domain
+                    ),
+                    cad_frame_skew_ms=(
+                        ""
+                        if last_sample is None or last_sample.frame_skew_ms is None
+                        else last_sample.frame_skew_ms
+                    ),
+                    cad_capture_to_publish_ms=(
+                        ""
+                        if last_sample is None or last_sample.frame_time_ns is None
+                        else (
+                            last_sample.source_time_ns - last_sample.frame_time_ns
+                        )
+                        / 1e6
+                    ),
+                    cad_publish_to_arrival_ms=(
+                        ""
+                        if last_sample is None
+                        else (
+                            last_sample.arrival_epoch_ns
+                            - last_sample.source_time_ns
+                        )
+                        / 1e6
+                    ),
+                    cad_frame_to_arrival_ms=(
+                        ""
+                        if last_sample is None or last_sample.frame_time_ns is None
+                        else (
+                            last_sample.arrival_epoch_ns
+                            - last_sample.frame_time_ns
+                        )
+                        / 1e6
+                    ),
+                    cad_arrival_monotonic_ns=(
+                        "" if last_sample is None else last_sample.arrival_monotonic_ns
+                    ),
+                    cad_arrival_epoch_ns=(
+                        "" if last_sample is None else last_sample.arrival_epoch_ns
+                    ),
                     cad_source_age_ms=source_age_ms,
                     cad_arrival_age_ms=arrival_age_ms,
                     cad_root_locked=False if last_sample is None else last_sample.root_locked,
@@ -434,8 +634,8 @@ def main() -> None:
                     deadman_release_generation=console.release_generation,
                     reanchor_generation=mapper.reanchor_generation,
                     commission_joint=""
-                    if commission_joint is None
-                    else commission_joint,
+                    if commission_joints is None
+                    else "|".join(str(joint) for joint in commission_joints),
                     hardware_live=False,
                     q_source="" if last_sample is None else last_sample.q,
                     q_source_filtered=""
@@ -453,7 +653,9 @@ def main() -> None:
             if now - last_log >= 1.0:
                 print(
                     "CAD_SIM "
-                    f"commission_joint={commission_joint if commission_joint is not None else 'all'} "
+                    f"state={'REST_HOLD' if rest_hold else 'RUNNING'} "
+                    "commission_joints="
+                    f"{'all' if commission_joints is None else ','.join(str(joint) for joint in commission_joints)} "
                     f"recv/valid/invalid={receiver.received_packets}/"
                     f"{receiver.valid_packets}/{receiver.invalid_packets} "
                     f"fresh={int(freshness.fresh)} age_ms={freshness.age_s * 1000:.1f} "
