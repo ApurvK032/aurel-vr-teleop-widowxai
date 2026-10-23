@@ -23,8 +23,10 @@ overview and current validated profile.
 
 - Ubuntu 20.04, 22.04, or 24.04
 - CPython 3.10
-- `trossen-arm==1.8.6`
-- WidowXAI controller firmware `1.8.x` (tested with `1.8.3`)
+- `trossen-arm==1.9.3`
+- WidowXAI controller firmware `1.9.x` (both lab arms run `1.9.4` since
+  2026-10-20; all earlier physical evidence was recorded on `1.8.3` with
+  driver `1.8.6` and has not yet been repeated on `1.9.4`)
 - wired Ethernet access to the arm controller
 
 The physical Trossen driver is not supported by this project on native Windows.
@@ -192,14 +194,16 @@ Do not proceed if any sign, axis, re-anchor, or gripper behavior is wrong.
 
 ### Build the hardware environment
 
-The tested arm requires Python 3.10 and driver 1.8.6:
+The lab arms (firmware 1.9.4) require Python 3.10 and driver 1.9.3. The script
+builds `.venv-arm19`; the older `.venv-arm18` (driver 1.8.6) can no longer
+connect, and its version gate fails before any arm contact:
 
 ```bash
 bash scripts/setup_legacy_hardware_env.sh
 
 env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-  .venv-arm18/bin/python -m pytest -q -p no:cacheprovider
+  .venv-arm19/bin/python -m pytest -q -p no:cacheprovider
 ```
 
 ### Configure the arm network
@@ -221,14 +225,14 @@ With the arm firmly mounted and supported:
 env -u PYTHONPATH .venv/bin/python scripts/check_workstation.py \
   --config configs/quest_50pct_hardware.yaml
 
-env -u PYTHONPATH .venv-arm18/bin/python scripts/preflight_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/preflight_hardware.py \
   --config configs/quest_50pct_hardware.yaml
 ```
 
 Test the Quest/control path without physical output:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/run_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/run_hardware.py \
   --config configs/quest_50pct_hardware.yaml \
   --duration 15 \
   --label quest-50pct-dry-run
@@ -240,7 +244,7 @@ Clear the workspace, keep grip released during startup, and remain ready to cut
 power:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/run_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/run_hardware.py \
   --config configs/quest_50pct_hardware.yaml \
   --live \
   --confirm-live LIVE-WIDOWXAI-192.168.1.2 \
@@ -283,7 +287,7 @@ env -u PYTHONPATH .venv/bin/python scripts/check_workstation.py \
   --config configs/dual_widowxai.yaml
 env -u PYTHONPATH .venv/bin/python scripts/preflight_dual_hardware.py \
   --config configs/dual_widowxai.yaml
-env -u PYTHONPATH .venv-arm18/bin/python scripts/run_dual_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/run_dual_hardware.py \
   --config configs/dual_widowxai.yaml \
   --duration 15
 ```

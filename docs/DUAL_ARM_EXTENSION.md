@@ -314,7 +314,7 @@ No-motion offline checks. Add `--contact-arms` to additionally open a
 read-only driver session to each controller without enabling position mode:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/preflight_dual_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/preflight_dual_hardware.py \
   --config configs/dual_widowxai.yaml
 ```
 
@@ -324,7 +324,7 @@ IPs. The single-arm `LIVE-WIDOWXAI-<IP>` token never enables two arms:
 ```bash
 # Only with explicit operator authorization, both calibrations accepted,
 # and measured base transforms in the profile.
-env -u PYTHONPATH .venv-arm18/bin/python scripts/run_dual_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/run_dual_hardware.py \
   --config configs/dual_widowxai.yaml --live \
   --confirm-live LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>
 ```

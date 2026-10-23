@@ -69,8 +69,10 @@ and dry runs. The code never chases delayed encoder feedback when re-anchoring.
 
 ## Before going to the lab
 
-The tested hardware environment is CPython 3.10 with `trossen-arm==1.8.6`; the
-controller firmware is 1.8.3. The follower is normally `192.168.1.2` and the PC
+The hardware environment is CPython 3.10 with `trossen-arm==1.9.3` in
+`.venv-arm19`; both controllers run firmware 1.9.4 since 2026-10-20. The CAD
+path was developed on firmware 1.8.3 and has not been re-run on 1.9.4. The
+follower is normally `192.168.1.2` and the PC
 robot-LAN address is `192.168.1.10/24`, with no gateway. Never probe controller
 port 50001 using `nc`, telnet, or a raw socket.
 
@@ -81,7 +83,7 @@ cd "/home/apurv/Codex-Complete/322/VR Teleoperation Stack for Robot Manipulation
 env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
   .venv/bin/python -m pytest -q -p no:cacheprovider
 env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-  .venv-arm18/bin/python -m pytest -q -p no:cacheprovider
+  .venv-arm19/bin/python -m pytest -q -p no:cacheprovider
 ```
 
 ## Lab commissioning sequence
@@ -167,13 +169,13 @@ env -u PYTHONPATH .venv/bin/python scripts/check_workstation.py \
    but does not enable position mode or send a command:
 
    ```bash
-   env -u PYTHONPATH .venv-arm18/bin/python scripts/preflight_hardware.py \
+   env -u PYTHONPATH .venv-arm19/bin/python scripts/preflight_hardware.py \
      --config configs/cad_hardware_commissioning.yaml
    ```
 6. Exercise the complete hardware lifecycle against the in-memory backend:
 
    ```bash
-   env -u PYTHONPATH .venv-arm18/bin/python scripts/run_cad_hardware.py \
+   env -u PYTHONPATH .venv-arm19/bin/python scripts/run_cad_hardware.py \
      --config configs/cad_hardware_commissioning.yaml \
      --commission-joint 0 \
      --duration 10 \
@@ -183,7 +185,7 @@ env -u PYTHONPATH .venv/bin/python scripts/check_workstation.py \
    commissioning:
 
    ```bash
-   env -u PYTHONPATH .venv-arm18/bin/python scripts/run_cad_hardware.py \
+   env -u PYTHONPATH .venv-arm19/bin/python scripts/run_cad_hardware.py \
      --config configs/cad_hardware_commissioning.yaml \
      --live \
      --confirm-live LIVE-WIDOWXAI-CAD-192.168.1.2 \

@@ -673,8 +673,10 @@ def validate_cad_hardware_config(config: dict[str, Any]) -> None:
         raise CadSafetyError("CAD startup collision screen requires at least 501 samples")
     if hardware.get("end_effector_profile") != "legacy_1_8":
         raise CadSafetyError("CAD commissioning requires the proven legacy_1_8 follower profile")
-    if str(hardware.get("driver_version_tested")) != "1.8.6":
-        raise CadSafetyError("CAD commissioning requires trossen-arm 1.8.6")
+    # Both lab controllers run firmware 1.9.4 since 2026-10-20; the driver
+    # major.minor must match, so the proven 1.8.6 driver can no longer connect.
+    if str(hardware.get("driver_version_tested")) != "1.9.3":
+        raise CadSafetyError("CAD commissioning requires trossen-arm 1.9.3")
 
     recovery = cad.get("fresh_samples_to_recover")
     if isinstance(recovery, bool) or not isinstance(recovery, (int, np.integer)):

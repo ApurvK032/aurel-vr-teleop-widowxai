@@ -18,6 +18,13 @@ by the official WidowXAI model. It now combines:
 - a legacy Trossen driver adapter matched to this physical arm;
 - measured smoothness/latency improvements developed one step at a time.
 
+**Firmware change, 2026-10-20.** Both lab controllers were flashed from firmware
+`1.8.3` to `1.9.4` outside this repository. The project now uses driver `1.9.3`
+in `.venv-arm19`; the old `.venv-arm18` (driver `1.8.6`) can no longer connect.
+Every physical acceptance described below was recorded on `1.8.3`/`1.8.6` and
+must be repeated on `1.9.4` before it is relied on. See the 2026-10-23 log
+entry.
+
 As of 2026-07-24, the current accepted single-arm profile is:
 
 ```text
@@ -99,11 +106,11 @@ none of these facts overrides the independent Right/Mirror 50% acceptance.
 | PC robot-LAN address | `192.168.1.10/24` on `benfei-lab-lan` (no gateway) |
 | Left/right arm IPs | `192.168.1.2` / `192.168.1.3` |
 | Driver TCP/UDP | TCP `50001`, UDP `50000` |
-| Trossen driver | `trossen-arm==1.8.6` |
-| Driver-reported version | `1.8.6` |
-| Controller firmware | `1.8.3` |
+| Trossen driver | `trossen-arm==1.9.3` (was `1.8.6` until 2026-10-20) |
+| Driver-reported version | `1.9.3` expected; not yet observed from this repository |
+| Controller firmware | `1.9.4` on both arms since 2026-10-20 (was `1.8.3`) |
 | End-effector profile | `StandardEndEffector.wxai_v0_follower` / project `legacy_1_8` |
-| Hardware Python | CPython 3.10 in `.venv-arm18` |
+| Hardware Python | CPython 3.10 in `.venv-arm19` (driver 1.9.3); `.venv-arm18` (1.8.6) is retired |
 | Simulation Python | project `.venv` |
 | Quest | Meta Quest 3 over USB ADB reverse |
 | Quest ADB | One authorized Quest 3 observed |
@@ -194,13 +201,16 @@ does not import the arm driver or send arm commands.
 Do not execute this unless the user explicitly authorizes a physical run:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/run_hardware.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/run_hardware.py \
   --config configs/quest_50pct_hardware.yaml \
   --live \
   --confirm-live LIVE-WIDOWXAI-192.168.1.2 \
   --duration 30 \
   --label right-mirror-50pct-arm-test
 ```
+
+This profile has not yet run on firmware 1.9.4. Treat the first run after the
+upgrade as a supervised re-acceptance run, preceded by a no-motion preflight.
 
 The explicit command-line gate replaced the earlier second interactive
 `ARM READY` prompt. Startup and shutdown remain automatic and supervised.
@@ -232,7 +242,7 @@ env -u PYTHONPATH .venv/bin/python scripts/run_six_axis_diagnostic.py
 Physical diagnostic, only with explicit authorization:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/run_six_axis_diagnostic.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/run_six_axis_diagnostic.py \
   --live \
   --confirm-live LIVE-WIDOWXAI-192.168.1.2
 ```
@@ -282,7 +292,7 @@ Quest controller
   -> clutch-relative task mapping and pose filter
   -> decoupled WidowXAI IK
   -> final command-spacing guard
-  -> Trossen 1.8.6 position command with a short horizon
+  -> Trossen 1.9.3 position command with a short horizon
   -> physical arm
 ```
 
@@ -376,9 +386,14 @@ arrive before the previous horizon finishes, so the controller continuously
 replans. A long horizon generally smooths but adds following lag; a very short
 horizon can reduce nominal lag but amplify tiny target reversals. Trossen also
 requires at least 300 Hz when interpolation is disabled with `goal_time=0`;
-this Python/WebXR path does not guarantee that rate. Firmware `1.8.3` and driver
-`1.8.6` are a confirmed matching pair. A newer firmware was discussed but never
-assumed to be a vibration fix and must not be flashed automatically.
+this Python/WebXR path does not guarantee that rate. Every latency, smoothness,
+and vibration result in this section was measured on firmware `1.8.3` with
+driver `1.8.6`. On 2026-10-20 the owner flashed both controllers to `1.9.4`;
+firmware 1.9 changes how streamed position goals are followed, so the horizon,
+feedforward, and spacing conclusions above must be re-measured on 1.9.4 before
+they are relied on or changed. Firmware must still never be flashed
+automatically, and Trossen strongly discourages returning to 1.8 because it
+resets the factory calibration.
 
 ## Headset, passthrough, and tabletop operation
 
@@ -729,6 +744,8 @@ alone makes the mapping correct; validate each signed direction and rotation.
 | `TCP connection closed unexpectedly` on shutdown | Controller/driver connection loss. Attempt measured hold only if possible; tell user to cut power. |
 | `NameError: control is not defined` | Historical no-catch-up launcher regression; fixed. |
 | Calibration `missing ... hand` | Historical right-hand generalization regression; fixed and tested. |
+| `wrong Trossen driver for this arm profile: installed=1.8.6, required=1.9.3` | Launched from the retired `.venv-arm18`. Use `.venv-arm19`. No arm connection was attempted. |
+| `Trossen driver/firmware mismatch` | Driver and controller firmware major.minor differ. Install the matching driver; never downgrade firmware or loosen the gate. |
 
 ## Repository layout and ownership
 
@@ -822,11 +839,12 @@ env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
   .venv/bin/python -m pytest -q -p no:cacheprovider
 ```
 
-For the legacy hardware environment without opening the arm:
+For the driver 1.9.3 hardware environment without opening the arm (this also
+checks the real driver's API offline; importing it opens no connection):
 
 ```bash
 env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-  .venv-arm18/bin/python -m pytest -q -p no:cacheprovider
+  .venv-arm19/bin/python -m pytest -q -p no:cacheprovider
 ```
 
 Tests do not authorize a physical connection. Avoid commands that instantiate
@@ -1896,17 +1914,67 @@ changing another variable.
 - Full `.venv` and no-arm `.venv-arm18` suites each pass 288 tests. The sibling
   CAD repository verifier passes all 25 tests. No robot was opened.
 
+### 2026-10-23 — Firmware 1.9.4 / driver 1.9.3 migration (offline)
+
+- On 2026-10-20 the owner flashed both controllers (left `192.168.1.2`, right
+  `192.168.1.3`) from firmware `1.8.3` to `1.9.4`, using the separate
+  `~/fall26/mira` upgrade workflow rather than this repository. Its before/after
+  controller-config backups in `~/fall26/mira/runs/arm_backup/` differ only by
+  a new `position_offset: 0` per joint; joint limits, gains, and factory
+  calibration are unchanged.
+- Trossen requires the driver and firmware major.minor to match, so driver
+  `1.8.6` can no longer connect. `.venv-arm19` (CPython 3.10.20) now holds the
+  exact `.venv-arm18` package set with only `trossen-arm==1.9.3`, the newest 1.9
+  release. `scripts/setup_legacy_hardware_env.sh` and the `pyproject.toml`
+  `hardware` extra build that environment. `.venv-arm18` is kept as history.
+- All 22 lab configs (`end_effector_profile: legacy_1_8`) now pin
+  `driver_version_tested: 1.9.3` with an inline re-validation-pending note, and
+  the CAD commissioning gate requires `1.9.3`. The comparison-only
+  `hardware_demo.yaml` (driver 1.11.0, no follower profile) is unchanged.
+- Driver 1.9.3 was checked offline against every call the backend makes:
+  `configure`, `set_arm_positions`, and `set_gripper_position` keep the same
+  positional order, with new optional feedforward-acceleration arguments after
+  ours. `StandardEndEffector.wxai_v0_follower` has parameters identical to
+  1.8.6, so `legacy_1_8` keeps its name and meaning. Driver 1.9.3 provides
+  `discover`, so `connect()` now runs official discovery for the one configured
+  IP before `configure` and reads the firmware version from discovery. That
+  path has never run from this repository against these arms. The driver
+  prints a notice on connect that default motor gains change in 1.10; it does
+  not apply to 1.9.x.
+- New tests: all lab configs pin the `pyproject.toml` driver and it matches
+  firmware 1.9.4; a fake 1.9.3 driver connects through discovery with the
+  unversioned follower and forwards feedforward velocity positionally; the
+  retired 1.8.6 driver is refused for these configs before any construction or
+  discovery; and, in the pinned-driver environment only, the real 1.9.3 module
+  exposes every call, field, and positional order the backend uses.
+- Verification: full `.venv` suite `293 passed, 1 skipped` (the real-driver
+  API test skips because `.venv` still carries 1.8.6); full `.venv-arm19`
+  suite `294 passed`. No Quest or arm was contacted and no command was sent.
+- Not validated: every earlier physical acceptance (Right/Mirror 50%,
+  Left/Mirror 45%, Behind 40%, dual Behind 40%, leader/follower, CAD) was
+  recorded on 1.8.3/1.8.6. Firmware 1.9 changes streamed-goal following, so
+  smoothness, vibration, tracking error, and latency must be re-measured before
+  any profile is relied on or retuned.
+
 ## Next planned work
 
-1. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
-2. Measure transport RTT/clock offset and repeated controller/encoder reversal
+1. Re-validate on firmware 1.9.4 with driver 1.9.3, with explicit owner
+   authorization for each step: a no-motion preflight of each arm (expect
+   driver 1.9.3, firmware 1.9.4, near-zero rest feedback), one single-arm
+   rest/home/rest cycle, then a short supervised run of the accepted
+   Right/Mirror 50% profile. Keep the 25 ms horizon, feedforward, and 8 ms
+   spacing unchanged for the first comparison against the 1.8 evidence; only
+   then judge whether 1.9's streaming behavior allows retuning. Repeat for the
+   dual, leader/follower, and CAD paths before relying on them.
+2. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
+3. Measure transport RTT/clock offset and repeated controller/encoder reversal
    events before claiming physical p95/p99 latency.
-3. Preserve Left/Mirror at its accepted 45% scope. Behind mapping is accepted
+4. Preserve Left/Mirror at its accepted 45% scope. Behind mapping is accepted
    at 40%; its staged 60% translation / 60% rotation response remains a
    benchmark profile, not a generally accepted scope. The rejected dynamic
    load-yield path must stay removed from physical control; its isolated
    MuJoCo-only failure reproducer must remain behind `--jerk-stress`.
-4. The dual-arm architecture in `docs/DUAL_ARM_EXTENSION.md` is implemented:
+5. The dual-arm architecture in `docs/DUAL_ARM_EXTENSION.md` is implemented:
    bimanual WebXR packet, combined MuJoCo scene, per-arm runtime, coordinated
    controller, dual telemetry, and three launchers, with offline tests. The
    measured 500 mm aligned base transforms are recorded, both individual home
@@ -1914,21 +1982,21 @@ changing another variable.
    front-facing Mirrored tracks cleanly at 45% but its front/back sign is
    re-opened. Dual gripper behavior and longer representative reliability
    remain pending.
-5. Two-arm driver output still requires accepted per-arm calibrations,
+6. Two-arm driver output still requires accepted per-arm calibrations,
    measured bases, all safety gates, explicit current authorization, and the
    dual token `LIVE-WIDOWXAI-DUAL-<left-ip>-<right-ip>`. The normal Behind and
    Mirrored profiles now satisfy the stored calibration gate; do not
    weaken the other gates or reuse a single-arm token.
-6. At 300 mm base separation the two arms collide when yawed roughly 0.25 rad
+7. At 300 mm base separation the two arms collide when yawed roughly 0.25 rad
    toward each other, and the 30 mm clearance margin rejects at about
    0.20 rad. Both figures come only from synthetic 300 mm test fixtures and do
    not describe the measured 500 mm bench. Re-derive task-specific clearance
    limits at the measured separation before expecting overlapping bimanual
    tasks.
-7. The CAD telemetry silent-drop exception is fixed. Keep both CAD launchers on
+8. The CAD telemetry silent-drop exception is fixed. Keep both CAD launchers on
    the strict `CAD_TELEMETRY_COLUMNS` schema; an undeclared field is a test
    failure rather than silently missing evidence.
-8. Measure camera glass-to-glass latency plus active bimanual WebXR pose-rate
+9. Measure camera glass-to-glass latency plus active bimanual WebXR pose-rate
    impact, and add an operator-critical camera-loss hold policy before treating
    the accepted three-view UI as ready for unattended remote teleoperation.
 

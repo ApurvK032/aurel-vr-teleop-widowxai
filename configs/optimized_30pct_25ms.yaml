@@ -60,7 +60,7 @@ hardware:
   end_effector_profile: legacy_1_8
   require_explicit_enable: true
   driver_package: trossen-arm
-  driver_version_tested: 1.8.6
+  driver_version_tested: 1.9.3  # both arms on firmware 1.9.4 since 2026-10-20; hardware re-validation pending
   # About two command periods, versus the old smooth profile's 30 ms.
   command_goal_time_s: 0.015
   # Match the two-second blocking return-to-rest duration while preserving the

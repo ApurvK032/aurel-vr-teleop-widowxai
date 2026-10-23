@@ -53,8 +53,8 @@ def hardware_state(q: np.ndarray) -> HardwareState:
         q,
         0.0,
         limits,
-        "1.8.3",
-        "1.8.6",
+        "1.9.4",
+        "1.9.3",
         np.full(7, 1e-4),
     )
 

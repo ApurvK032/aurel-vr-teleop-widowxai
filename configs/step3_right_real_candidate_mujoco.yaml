@@ -70,7 +70,7 @@ hardware:
   end_effector_profile: legacy_1_8
   require_explicit_enable: true
   driver_package: trossen-arm
-  driver_version_tested: 1.8.6
+  driver_version_tested: 1.9.3  # both arms on firmware 1.9.4 since 2026-10-20; hardware re-validation pending
   command_goal_time_s: 0.025
   arm_velocity_feedforward:
     enabled: true

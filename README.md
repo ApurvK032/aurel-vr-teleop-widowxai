@@ -123,8 +123,11 @@ Current milestones, measured performance, and open blockers are tracked in
 
 ## Physical arm
 
-Physical output requires Ubuntu, CPython 3.10, the legacy Trossen 1.8.6 driver,
-and wired Ethernet to the arm. Native Windows is supported only for MuJoCo.
+Physical output requires Ubuntu, CPython 3.10, Trossen driver 1.9.3 (matching the
+lab controllers' firmware 1.9.4 since 2026-10-20; build it with
+`bash scripts/setup_legacy_hardware_env.sh`), and wired Ethernet to the arm.
+Every physical acceptance so far was recorded on firmware 1.8.3 / driver 1.8.6
+and must be repeated on 1.9.4 before it is relied on. Native Windows is supported only for MuJoCo.
 
 Before enabling output:
 
@@ -260,7 +263,7 @@ physical left arm (`192.168.1.2`) as the leader and the physical right arm
 (`192.168.1.3`) as the follower:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/leader_follower.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/leader_follower.py \
   --duration 3600
 ```
 

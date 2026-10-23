@@ -59,11 +59,11 @@ hardware:
   robot_ip: 192.168.1.2
   # First real-arm run controls J0-J5 only. Leave the physical gripper untouched.
   control_gripper: false
-  # Exact legacy profile used successfully with trossen-arm 1.8.6.
+  # Unversioned wxai_v0_follower profile: proven with driver 1.8.6 and unchanged in 1.9.3.
   end_effector_profile: legacy_1_8
   require_explicit_enable: true
   driver_package: trossen-arm
-  driver_version_tested: 1.8.6
+  driver_version_tested: 1.9.3  # both arms on firmware 1.9.4 since 2026-10-20; hardware re-validation pending
   # Proven interpolation horizon from the prior real-arm command stream.
   command_goal_time_s: 0.030
   startup_ramp_duration_s: 20.0
