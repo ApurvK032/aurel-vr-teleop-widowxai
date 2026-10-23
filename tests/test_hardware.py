@@ -1,9 +1,12 @@
+import importlib.metadata
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from scripts.run_hardware import (
     make_startup_command_gate,
@@ -24,6 +27,7 @@ from widowxai_quest_teleop.config import (
     task_profile_for_quest_selection,
 )
 from widowxai_quest_teleop.hardware import (
+    END_EFFECTOR_PROFILE_TO_VARIANT,
     CommandGate,
     HardwareState,
     HardwareSafetyError,
@@ -660,7 +664,7 @@ def test_article_timing_is_rejected_for_live_hardware_but_safe_profile_passes() 
     assert safe["ik"]["max_dq_per_joint_rad"] == baseline["ik"]["max_dq_per_joint_rad"]
     assert safe["control"]["loop_rate_hz"] == 100
     assert safe["hardware"]["command_goal_time_s"] == pytest.approx(0.030)
-    assert safe["hardware"]["driver_version_tested"] == "1.8.6"
+    assert safe["hardware"]["driver_version_tested"] == "1.9.3"
     assert safe["hardware"]["end_effector_profile"] == "legacy_1_8"
     assert safe["hardware"]["control_gripper"] is False
     assert safe["model"]["simulation_start_q_rad"] == pytest.approx(
@@ -1378,3 +1382,215 @@ def test_required_legacy_driver_version_is_checked_before_arm_connection() -> No
     )
     with pytest.raises(HardwareUnavailableError, match="no arm connection was attempted"):
         backend.connect()
+
+
+# Both lab controllers were flashed from firmware 1.8.3 to 1.9.4 on 2026-10-20.
+LAB_FIRMWARE_VERSION = "1.9.4"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def pinned_hardware_driver_version() -> str:
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'"trossen-arm==([0-9.]+);', pyproject)
+    assert match is not None, "pyproject hardware extra must pin trossen-arm exactly"
+    return match.group(1)
+
+
+def test_lab_configs_pin_the_driver_that_matches_the_upgraded_firmware() -> None:
+    pinned = pinned_hardware_driver_version()
+    require_compatible_versions(pinned, LAB_FIRMWARE_VERSION)
+    lab_configs = {}
+    for path in sorted((PROJECT_ROOT / "configs").glob("*.yaml")):
+        hardware = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("hardware") or {}
+        if hardware.get("end_effector_profile") == "legacy_1_8":
+            lab_configs[path.name] = str(hardware.get("driver_version_tested"))
+    assert {"quest_50pct_hardware.yaml", "dual_widowxai.yaml"} <= set(lab_configs)
+    assert {name: version for name, version in lab_configs.items() if version != pinned} == {}
+
+
+def test_driver_193_connects_to_firmware_194_through_discovery_with_unversioned_follower() -> None:
+    class EnumValue:
+        def __init__(self, value):
+            self.value = value
+
+    class Limit:
+        def __init__(self, lower, upper):
+            self.position_min = lower
+            self.position_max = upper
+            self.position_tolerance = 1e-4
+
+    follower = object()
+
+    class Driver193:
+        instance = None
+        discover_calls = []
+
+        def __init__(self):
+            Driver193.instance = self
+            self.calls = []
+
+        @staticmethod
+        def discover(**kwargs):
+            Driver193.discover_calls.append(kwargs)
+            return [
+                SimpleNamespace(
+                    ip="192.168.1.3",
+                    model=EnumValue(1),
+                    error_state=EnumValue(0),
+                    firmware_version=LAB_FIRMWARE_VERSION,
+                )
+            ]
+
+        def configure(self, *args):
+            self.calls.append(("configure", args))
+
+        def get_controller_version(self):
+            raise AssertionError("1.9 connects take the firmware version from discovery")
+
+        def get_all_positions(self):
+            return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        def get_joint_limits(self):
+            return [Limit(-2.0, 2.0) for _ in range(6)] + [Limit(0.0, 0.044)]
+
+        def set_arm_modes(self, mode):
+            self.calls.append(("arm_mode", mode))
+
+        def set_arm_positions(
+            self,
+            goal_positions,
+            goal_time=2.0,
+            blocking=True,
+            goal_feedforward_velocities=None,
+            goal_feedforward_accelerations=None,
+        ):
+            self.calls.append(
+                (
+                    "arm_positions",
+                    np.asarray(goal_positions, dtype=float).copy(),
+                    goal_time,
+                    blocking,
+                    None
+                    if goal_feedforward_velocities is None
+                    else np.asarray(goal_feedforward_velocities, dtype=float).copy(),
+                )
+            )
+
+        def cleanup(self, reboot_controller=False):
+            self.calls.append(("cleanup", reboot_controller))
+
+    module = SimpleNamespace(
+        TrossenArmDriver=Driver193,
+        Model=SimpleNamespace(wxai_v0=EnumValue(1)),
+        # Driver 1.9.3 has only the unversioned follower name.
+        StandardEndEffector=SimpleNamespace(wxai_v0_follower=follower),
+        Mode=SimpleNamespace(position=EnumValue(3)),
+    )
+    backend = TrossenArmBackend(
+        "192.168.1.3",
+        driver_module=module,
+        platform_name="Linux",
+        driver_version="1.9.3",
+        required_driver_version=pinned_hardware_driver_version(),
+        command_goal_time_s=0.025,
+        end_effector_variant=END_EFFECTOR_PROFILE_TO_VARIANT["legacy_1_8"],
+    )
+    state = backend.connect()
+    assert Driver193.discover_calls == [
+        {"subnet": "192.168.1", "ip_start": 3, "ip_end": 3, "timeout": 0.05}
+    ]
+    assert state.driver_version == "1.9.3"
+    assert state.firmware_version == LAB_FIRMWARE_VERSION
+    configure = Driver193.instance.calls[0]
+    assert configure[0] == "configure"
+    assert configure[1][1] is follower
+    assert configure[1][2:] == ("192.168.1.3", False)
+    backend.enable_position_control(include_gripper=False)
+    q = np.array([0.0, np.pi / 3.0, 5.0 * np.pi / 12.0, -np.pi / 3.0, 0.0, 0.0])
+    feedforward = np.array([0.1, -0.1, 0.0, 0.2, 0.0, -0.2])
+    backend.send_positions(q, 0.0, include_gripper=False, arm_feedforward_velocity=feedforward)
+    arm_call = Driver193.instance.calls[-1]
+    assert arm_call[0] == "arm_positions"
+    np.testing.assert_array_equal(arm_call[1], q)
+    assert arm_call[2:4] == (0.025, False)
+    np.testing.assert_array_equal(arm_call[4], feedforward)
+    backend.close()
+    assert Driver193.instance.calls[-1] == ("cleanup", False)
+
+
+def test_retired_186_driver_is_refused_for_upgraded_lab_configs_before_any_contact() -> None:
+    class DriverThatMustNotBeTouched:
+        def __init__(self):
+            raise AssertionError("a retired driver must fail before construction")
+
+        @staticmethod
+        def discover(**_kwargs):
+            raise AssertionError("a retired driver must fail before discovery")
+
+    config = load_config(PROJECT_ROOT / "configs" / "quest_50pct_hardware.yaml")
+    backend = TrossenArmBackend(
+        str(config["hardware"]["robot_ip"]),
+        driver_module=SimpleNamespace(TrossenArmDriver=DriverThatMustNotBeTouched),
+        platform_name="Linux",
+        driver_version="1.8.6",
+        required_driver_version=str(config["hardware"]["driver_version_tested"]),
+        end_effector_variant=END_EFFECTOR_PROFILE_TO_VARIANT["legacy_1_8"],
+    )
+    with pytest.raises(HardwareUnavailableError, match="no arm connection was attempted"):
+        backend.connect()
+    with pytest.raises(HardwareSafetyError, match="major.minor must match"):
+        require_compatible_versions("1.8.6", LAB_FIRMWARE_VERSION)
+
+
+def test_installed_193_driver_exposes_every_call_the_backend_makes() -> None:
+    """Offline API check against the real driver; importing it opens no connection."""
+
+    trossen_arm = pytest.importorskip("trossen_arm")
+    if importlib.metadata.version("trossen-arm") != pinned_hardware_driver_version():
+        pytest.skip("runs only in the hardware environment with the pinned driver")
+    driver = trossen_arm.TrossenArmDriver
+    for name in (
+        "discover",
+        "configure",
+        "get_all_positions",
+        "get_joint_limits",
+        "set_arm_modes",
+        "set_gripper_mode",
+        "set_arm_positions",
+        "set_gripper_position",
+        "cleanup",
+    ):
+        assert hasattr(driver, name), name
+    assert hasattr(trossen_arm.StandardEndEffector, END_EFFECTOR_PROFILE_TO_VARIANT["legacy_1_8"])
+    assert hasattr(trossen_arm.Model, "wxai_v0")
+    assert hasattr(trossen_arm.Mode, "position")
+    for field in ("position_min", "position_max", "position_tolerance"):
+        assert hasattr(trossen_arm.JointLimit, field), field
+    for field in ("ip", "model", "error_state", "firmware_version"):
+        assert hasattr(trossen_arm.DiscoverResult, field), field
+
+    def positional_names(method) -> list[str]:
+        signature = method.__doc__.splitlines()[0]
+        params = signature[signature.index("(") + 1 : signature.rindex(") ->")]
+        return [part.split(":")[0].strip() for part in params.split(", ") if ":" in part]
+
+    assert positional_names(driver.configure)[:5] == [
+        "self",
+        "model",
+        "end_effector",
+        "serv_ip",
+        "clear_error",
+    ]
+    assert positional_names(driver.set_arm_positions)[:5] == [
+        "self",
+        "goal_positions",
+        "goal_time",
+        "blocking",
+        "goal_feedforward_velocities",
+    ]
+    assert positional_names(driver.set_gripper_position)[:4] == [
+        "self",
+        "goal_position",
+        "goal_time",
+        "blocking",
+    ]

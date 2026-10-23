@@ -20,9 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.4,<10"]
-# The local arm runs controller firmware 1.8.3. The previously successful
-# hardware environment used the compatible CPython 3.10 driver 1.8.6.
-hardware = ["trossen-arm==1.8.6; platform_system != 'Windows'"]
+# Both lab arms were flashed from controller firmware 1.8.3 to 1.9.4 on
+# 2026-10-20. The driver major.minor must match the firmware, so the CPython 3.10
+# hardware environment (.venv-arm19) uses driver 1.9.3, the newest 1.9 release.
+hardware = ["trossen-arm==1.9.3; platform_system != 'Windows'"]
 placo = ["placo>=0.9.23,<1"]
 
 [project.scripts]

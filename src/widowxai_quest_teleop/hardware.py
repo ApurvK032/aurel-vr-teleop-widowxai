@@ -21,9 +21,9 @@ class HardwareSafetyError(RuntimeError):
 
 _VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)(?:\.\d+)?")
 END_EFFECTOR_PROFILE_TO_VARIANT = {
-    # This is the exact unversioned follower profile used by the previously
-    # working trossen-arm 1.8.6 environment. That driver predates the dated
-    # follower names.
+    # The unversioned follower profile proven with trossen-arm 1.8.6. Driver
+    # 1.9.3 (for the lab's firmware 1.9.4) provides the same name with
+    # identical parameters; neither driver has the dated follower names.
     "legacy_1_8": "wxai_v0_follower",
     "20250509": "wxai_v0_follower_20250509",
     "20260626": "wxai_v0_follower_20260626",

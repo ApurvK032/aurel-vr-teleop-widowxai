@@ -44,6 +44,76 @@ def _self_contact(
     return found, deepest
 
 
+def screen_self_collision_path(
+    single_model: WidowXAIModel,
+    *,
+    start_q: np.ndarray,
+    end_q: np.ndarray,
+    start_gripper_m: float,
+    end_gripper_m: float | None = None,
+    samples: int,
+    label: str,
+    allow_marginal_start_m: float = 0.0,
+) -> tuple[float, float | None]:
+    """Screen one arm's own collision geometry along a straight joint path.
+
+    Any contact fails closed, except that a measured start already in model
+    contact is accepted when ``allow_marginal_start_m`` is positive, the start
+    penetration is within it, the path never deepens it, clears it, and never
+    re-enters contact. This is the 2026-08-12 owner-accepted rule for the right
+    arm's known near-rest ``link_2``/``link_4`` model overlap.
+
+    Returns the start penetration depth and the path fraction where a marginal
+    start cleared; a clear start returns ``(0.0, None)``.
+    """
+
+    if samples < 2:
+        raise ValueError("path screen requires at least two samples")
+    start = np.asarray(start_q, dtype=float).reshape(6)
+    end = np.asarray(end_q, dtype=float).reshape(6)
+    start_gripper = max(0.0, float(start_gripper_m))
+    end_gripper = start_gripper if end_gripper_m is None else max(0.0, float(end_gripper_m))
+
+    start_contact, start_depth = _self_contact(single_model, start, start_gripper)
+    marginal = bool(start_contact and allow_marginal_start_m > 0.0)
+    if start_contact and not marginal:
+        raise HardwareSafetyError(f"{label} self-collision model rejects the path at 0.0%")
+    if marginal and start_depth > float(allow_marginal_start_m):
+        raise HardwareSafetyError(
+            f"{label} measured start contact is {start_depth * 1000:.3f} mm, "
+            f"above the {float(allow_marginal_start_m) * 1000:.3f} mm marginal limit"
+        )
+
+    cleared_at: float | None = None
+    penetration_tolerance_m = 1e-6
+    for alpha in np.linspace(0.0, 1.0, samples):
+        q = start + alpha * (end - start)
+        gripper = start_gripper + alpha * (end_gripper - start_gripper)
+        contact, depth = _self_contact(single_model, q, gripper)
+        if not marginal:
+            if contact:
+                raise HardwareSafetyError(
+                    f"{label} self-collision model rejects the path near {alpha * 100:.1f}%"
+                )
+            continue
+        if contact and depth > start_depth + penetration_tolerance_m:
+            raise HardwareSafetyError(
+                f"{label} path deepens the measured start contact near "
+                f"{alpha * 100:.1f}% ({depth * 1000:.3f} mm vs "
+                f"{start_depth * 1000:.3f} mm at rest)"
+            )
+        if not contact and cleared_at is None:
+            cleared_at = float(alpha)
+        elif contact and cleared_at is not None:
+            raise HardwareSafetyError(
+                f"{label} path re-enters self-collision near {alpha * 100:.1f}%"
+            )
+
+    if marginal and cleared_at is None:
+        raise HardwareSafetyError(f"{label} measured start contact never clears along the path")
+    return (float(start_depth) if marginal else 0.0), cleared_at
+
+
 def cross_arm_separation(
     dual_model: DualArmCollisionModel,
     *,
@@ -150,44 +220,22 @@ def screen_selected_path(
         else max(0.0, float(moving_end_gripper_m))
     )
 
-    start_contact, start_depth = _self_contact(single_model, start, start_gripper)
-    marginal = bool(start_contact and allow_marginal_start_m > 0.0)
-    if start_contact and not marginal:
-        raise HardwareSafetyError(f"{moving_side} self-collision model rejects the path at 0.0%")
-    if marginal and start_depth > float(allow_marginal_start_m):
-        raise HardwareSafetyError(
-            f"{moving_side} measured start contact is {start_depth * 1000:.3f} mm, "
-            f"above the {float(allow_marginal_start_m) * 1000:.3f} mm marginal limit"
-        )
+    start_depth, cleared_at = screen_self_collision_path(
+        single_model,
+        start_q=start,
+        end_q=end,
+        start_gripper_m=start_gripper,
+        end_gripper_m=end_gripper,
+        samples=samples,
+        label=moving_side,
+        allow_marginal_start_m=allow_marginal_start_m,
+    )
 
-    cleared_at: float | None = None
-    penetration_tolerance_m = 1e-6
     minimum = np.inf
     minimum_alpha = 0.0
     for alpha in np.linspace(0.0, 1.0, samples):
         q = start + alpha * (end - start)
         gripper = start_gripper + alpha * (end_gripper - start_gripper)
-        contact, depth = _self_contact(single_model, q, gripper)
-        if not marginal:
-            if contact:
-                raise HardwareSafetyError(
-                    f"{moving_side} self-collision model rejects the path near "
-                    f"{alpha * 100:.1f}%"
-                )
-        else:
-            if contact and depth > start_depth + penetration_tolerance_m:
-                raise HardwareSafetyError(
-                    f"{moving_side} path deepens the measured start contact near "
-                    f"{alpha * 100:.1f}% ({depth * 1000:.3f} mm vs "
-                    f"{start_depth * 1000:.3f} mm at rest)"
-                )
-            if not contact and cleared_at is None:
-                cleared_at = float(alpha)
-            elif contact and cleared_at is not None:
-                raise HardwareSafetyError(
-                    f"{moving_side} path re-enters self-collision near {alpha * 100:.1f}%"
-                )
-
         separation = cross_arm_separation(
             dual_model,
             moving_side=moving_side,
@@ -201,11 +249,7 @@ def screen_selected_path(
             minimum = separation
             minimum_alpha = float(alpha)
 
-    if marginal:
-        if cleared_at is None:
-            raise HardwareSafetyError(
-                f"{moving_side} measured start contact never clears along the path"
-            )
+    if cleared_at is not None:
         print(
             f"  {moving_side}: measured {start_depth * 1000:.3f} mm start contact "
             f"never deepens and clears by {cleared_at * 100:.1f}%"

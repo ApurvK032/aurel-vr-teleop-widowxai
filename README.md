@@ -123,8 +123,11 @@ Current milestones, measured performance, and open blockers are tracked in
 
 ## Physical arm
 
-Physical output requires Ubuntu, CPython 3.10, the legacy Trossen 1.8.6 driver,
-and wired Ethernet to the arm. Native Windows is supported only for MuJoCo.
+Physical output requires Ubuntu, CPython 3.10, Trossen driver 1.9.3 (matching the
+lab controllers' firmware 1.9.4 since 2026-10-20; build it with
+`bash scripts/setup_legacy_hardware_env.sh`), and wired Ethernet to the arm.
+Every physical acceptance so far was recorded on firmware 1.8.3 / driver 1.8.6
+and must be repeated on 1.9.4 before it is relied on. Native Windows is supported only for MuJoCo.
 
 Before enabling output:
 
@@ -256,18 +259,18 @@ Architecture, staged validation, and the definition of done are in
 ## Arm-to-arm leader/follower
 
 `scripts/leader_follower.py` is the small Trossen-driver path for using the
-physical right arm (`192.168.1.3`) as the leader and the physical left arm
-(`192.168.1.2`) as the follower:
+physical left arm (`192.168.1.2`) as the leader and the physical right arm
+(`192.168.1.3`) as the follower:
 
 ```bash
-env -u PYTHONPATH .venv-arm18/bin/python scripts/leader_follower.py \
+env -u PYTHONPATH .venv-arm19/bin/python scripts/leader_follower.py \
   --duration 3600
 ```
 
 This is Trossen's official seven-axis position/velocity-copy and 0.1-gain force
 feedback pattern with the bench IPs and a one-hour default duration. It returns
 both arms to home and rest on exit and requires the operator to support the
-right leader when external-effort mode begins. This minimal path does not use
+left leader when external-effort mode begins. This minimal path does not use
 Quest input, the project's combined collision checker, or its detailed tracking
 telemetry; use it only with separated workspaces and an operator ready to stop
 the run.

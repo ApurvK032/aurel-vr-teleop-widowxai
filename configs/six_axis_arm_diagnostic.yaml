@@ -48,7 +48,7 @@ hardware:
   control_gripper: false
   end_effector_profile: legacy_1_8
   require_explicit_enable: true
-  driver_version_tested: 1.8.6
+  driver_version_tested: 1.9.3  # both arms on firmware 1.9.4 since 2026-10-20; hardware re-validation pending
   startup_ramp_duration_s: 2.0
   startup_ramp_rate_hz: 120
   startup_max_joint_delta_rad: [0.006, 0.006, 0.006, 0.006, 0.006, 0.006]

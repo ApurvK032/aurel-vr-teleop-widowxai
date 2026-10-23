@@ -47,7 +47,7 @@ hardware:
   end_effector_profile: legacy_1_8
   require_explicit_enable: true
   driver_package: trossen-arm
-  driver_version_tested: 1.8.6
+  driver_version_tested: 1.9.3  # both arms on firmware 1.9.4 since 2026-10-20; hardware re-validation pending
   # Trossen requires >=300 Hz for zero-horizon commands. This complete Python
   # path cannot guarantee that rate, so use the smallest two-tick horizon at
   # the article's 200 Hz rate. Commands remain nonblocking and unshaped here.

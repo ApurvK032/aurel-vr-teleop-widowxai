@@ -1,6 +1,6 @@
 # Project progress and measured performance
 
-Last updated: 2026-08-19
+Last updated: 2026-10-23
 
 This is the short operational ledger. `AGENTS.md` retains the complete history,
 safety rules, failure analysis, and exact milestone chronology. Raw run evidence
@@ -10,6 +10,7 @@ stays under `runs/`; compact publishable metrics stay under `results/`.
 
 | Area | Status | Best evidence / performance | What it does not prove |
 |---|---|---|---|
+| Arm firmware / driver | Upgraded; right-arm solo re-checked | Both controllers flashed 1.8.3 → 1.9.4 on 2026-10-20; stored settings unchanged except a new zero `position_offset` per joint; project moved to driver 1.9.3 in `.venv-arm19`. Right arm `.3` solo at 40% Behind with full gripper ran the full 45 s (4,050 rows at 90.00 Hz, zero IK failures, no input pauses) on 2026-10-23, and the owner reports it works | Right-hand wrist calibration and roll/pitch mapping are not yet tuned; every other physical result below was measured on firmware 1.8.3 / driver 1.8.6 and not yet repeated |
 | Single-arm Quest teleoperation | Accepted baseline | Right controller + Mirrored at 50% task scale; latest accepted run 4,627 rows over 51.398 s at 90.003 Hz with zero IK failures | The other three hand/mapping combinations are not accepted at this scale |
 | Single-arm response | Accepted as smooth and responsive | Approximately 30 ms estimated controller-capture-to-encoder response from software/driver telemetry | Not a synchronized high-speed-camera measurement |
 | Bimanual Quest transport | Physically exercised and direction-accepted | Schema-v2 packets drove both arms together for 3,786 rows at 89.874 Hz overall; the operator confirmed correct response in every direction | Transport evidence does not validate Mirrored/front-facing mode or dual grippers |
@@ -29,7 +30,7 @@ stays under `runs/`; compact publishable metrics stay under `results/`.
 | Front-facing Mirrored dual run | Technically clean at 45%; front/back direction rejected | Latest full run: 4,049 rows/44.991 s at 89.996 Hz, 2,766 both-engaged rows, zero IK/fault/hold/collision rows, 0.007872/0.013752 rad left/right maximum error, and 1.121 ms maximum send skew. Assignment, lateral/vertical motion, and rotations felt correct | Both calibrations use position signs `[-1,-1,+1]`; telemetry confirms hand-forward drives robot `−X` with −0.93/−0.95 correlation. Test candidate `[+1,-1,+1]` in MuJoCo before physical reuse |
 | Three-camera Quest operator view | Operator-accepted | One D455 plus two D405 feeds at 640×480×30 FPS; measured rates 29.97, 30.02, and 30.00 FPS | Glass-to-glass latency and three-stream impact on active WebXR pose rate remain unmeasured |
 | Camera UI | Operator-accepted | Persistent serial-based Scene/Left wrist/Right wrist assignment; adaptive 1/2/3-panel world anchor; B-button focus cycle; 380 ms transitions; common +0.18 m vertical offset | Camera loss currently warns but does not force robot hold |
-| Offline regression suite | Passing after CAD deadman and zero-rest MuJoCo audit | 288 tests in `.venv` and 288 in `.venv-arm18`; CAD filtering, raw-watchdog separation, wrap/reset behavior, live workstation route checks, pending-mapping single-joint isolation, kernel-polled hold-to-run faults, zero-rest simulation, viewer keys, and existing safety paths are covered | Offline tests do not accept CAD directions, physically qualify the selected deadman device, repair USB topology, or make another tight-object release safe |
+| Offline regression suite | Passing after the driver 1.9.3 migration | 293 passed + 1 expected skip in `.venv`, 294 passed in `.venv-arm19` (including an offline check of the real 1.9.3 driver API); CAD filtering, raw-watchdog separation, wrap/reset behavior, live workstation route checks, pending-mapping single-joint isolation, kernel-polled hold-to-run faults, zero-rest simulation, viewer keys, and existing safety paths are covered | Offline tests do not accept CAD directions, physically qualify the selected deadman device, repair USB topology, or make another tight-object release safe |
 
 ## Camera milestone details
 
@@ -199,10 +200,11 @@ implementation and evidence are ahead of their tracker state:
   toggles, overview/focus cycling, and world-anchored transitions. Remaining
   closure work is glass-to-glass latency, active pose-rate impact, and a
   camera-loss hold policy.
-- **#4 calibration/reach UX:** still outstanding. Bimanual Apply input still
-  disarms calibration until the 2D Calibrate wrist button is pressed, and the
-  headset does not persistently show per-hand calibration, clutch, or near-limit
-  state.
+- **#4 calibration/reach UX:** still outstanding. Wrist calibration now arms
+  only from the 2D Calibrate wrist button in every mode (2026-10-23: the
+  right-hand page had auto-armed it, so closing the gripper while clutched
+  paused streaming for 5 s). The headset still does not persistently show
+  per-hand calibration, clutch, or near-limit state.
 
 ## Recommended next milestone
 

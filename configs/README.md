@@ -98,8 +98,10 @@ without first testing it in MuJoCo.
   geometry screens every command and shutdown path.
 - `right_dual_bench_40pct_full_gripper_hardware.yaml` is the requested second
   stage: 0.40 translation/rotation scale, 0.070 m / 0.16 rad reach, full
-  trigger-controlled 0–0.040 m gripper stroke, and a 45 s cap. It requires the
-  same `.2` read-only stationary-arm guard. The operator accepted its directions,
+  trigger-controlled 0–0.040 m gripper stroke, and a 45 s cap. While arm `.2`
+  is mounted beside it, it requires the same `.2` read-only stationary-arm
+  guard; with `.2` removed from the bench it may run solo without the guard
+  flags (owner decision, 2026-10-23). The operator accepted its directions,
   orientation response, gripper, and shutdown on 2026-08-12; it does not replace
   the clean 0.20 evidence profile or validate higher gains.
 

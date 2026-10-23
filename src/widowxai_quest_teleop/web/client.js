@@ -109,7 +109,10 @@ let selectedInputSource = null;
 // Otherwise placing the headset down can rotate the task frame on re-clutch.
 let operatorHead = null;
 let wristOffset = JSON.parse(localStorage.getItem(wristOffsetStorageKey) || "null");
-let calibrationArmed = wristOffset === null;
+// Wrist calibration starts only after the operator presses "Calibrate wrist".
+// Its right-hand chord (grip + trigger) is also clutch + close-gripper, so an
+// automatically armed capture paused pose streaming for 5 s mid-teleop.
+let calibrationArmed = false;
 let calibrationStartedAt = null;
 let calibrationSamples = [];
 // Bimanual mode needs both hands' pivots live at once, so it keeps its own
@@ -161,7 +164,6 @@ function refreshInputSelection() {
     inputSelectionText.textContent =
       `Active: bimanual · left ${mappingModeLabel(handMappingModes.left)} · right ${mappingModeLabel(handMappingModes.right)}`;
   } else {
-    calibrationArmed = wristOffset === null;
     calibrationText.textContent = offsetLabel(wristOffset);
     controllerDescription.textContent = `This page streams the ${selectedHand} Meta Quest controller using ${mappingModeLabel().toLowerCase()}. Grip is the clutch; trigger controls the gripper.`;
     inputSelectionText.textContent = `Active: ${selectedHand} controller · ${mappingModeLabel()}`;
@@ -434,6 +436,16 @@ function finishWristCalibration() {
   setStatus(`${hand} wrist calibrated; streaming`, true);
 }
 
+function failWristCalibration(error) {
+  // Disarm so the next grip + trigger press drives the gripper again instead
+  // of silently starting another 5 s capture.
+  calibrationArmed = false;
+  calibrationStartedAt = null;
+  calibrationSamples = [];
+  calibratingHand = null;
+  setStatus(`Wrist calibration failed: ${error.message}; press Calibrate wrist to retry`);
+}
+
 function bimanualControllerBlock(frame, inputSource, hand) {
   // Absent source, absent gripSpace, and a null getPose all mean the same
   // thing to the robot: this controller is not tracked right now. Report it
@@ -486,10 +498,7 @@ function onBimanualFrame(frameTime, frame, viewerPose, inputSources) {
     if (frameTime - calibrationStartedAt >= 5000) {
       try { finishWristCalibration(); }
       catch (error) {
-        calibrationStartedAt = null;
-        calibrationSamples = [];
-        calibratingHand = null;
-        setStatus(`Wrist calibration failed: ${error.message}`);
+        failWristCalibration(error);
       }
     }
     return;
@@ -564,9 +573,7 @@ function onXRFrame(frameTime, frame) {
     if (frameTime - calibrationStartedAt >= 5000) {
       try { finishWristCalibration(); }
       catch (error) {
-        calibrationStartedAt = null;
-        calibrationSamples = [];
-        setStatus(`Wrist calibration failed: ${error.message}`);
+        failWristCalibration(error);
       }
     }
     return;
