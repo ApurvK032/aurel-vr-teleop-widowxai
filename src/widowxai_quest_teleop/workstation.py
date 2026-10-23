@@ -54,14 +54,31 @@ def _external_power_supply(power_supply_root: Path) -> str:
         raise WorkstationSafetyError(
             f"could not inspect external power under {power_supply_root}: {exc}"
         ) from None
+    system_battery = False
     for supply in supplies:
         try:
-            supply_type = (supply / "type").read_text(encoding="utf-8").strip()
+            supply_type = (supply / "type").read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            continue
+        if supply_type == "battery":
+            # Wireless mice and controllers report scope "Device"; only a
+            # system battery can power the workstation itself.
+            try:
+                scope = (supply / "scope").read_text(encoding="utf-8").strip().lower()
+            except OSError:
+                scope = "system"
+            if scope != "device":
+                system_battery = True
+            continue
+        try:
             online = (supply / "online").read_text(encoding="utf-8").strip()
         except OSError:
             continue
-        if supply_type.lower() != "battery" and online == "1":
+        if online == "1":
             return supply.name
+    if not system_battery:
+        # A desktop without a system battery can only be running on mains.
+        return "mains-no-battery"
     raise WorkstationSafetyError(
         "external AC power could not be verified; connect the laptop charger"
     )

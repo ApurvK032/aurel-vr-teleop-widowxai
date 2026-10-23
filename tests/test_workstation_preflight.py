@@ -12,11 +12,16 @@ from widowxai_quest_teleop.workstation import (
 )
 
 
-def power_supply(tmp_path, *, online: bool = True):
+def power_supply(tmp_path, *, online: bool = True, battery: bool = False):
     mains = tmp_path / "AC"
     mains.mkdir(exist_ok=True)
     (mains / "type").write_text("Mains\n", encoding="utf-8")
     (mains / "online").write_text("1\n" if online else "0\n", encoding="utf-8")
+    if battery:
+        system_battery = tmp_path / "BAT0"
+        system_battery.mkdir(exist_ok=True)
+        (system_battery / "type").write_text("Battery\n", encoding="utf-8")
+        (system_battery / "scope").write_text("System\n", encoding="utf-8")
     return tmp_path
 
 
@@ -72,7 +77,7 @@ def test_workstation_preflight_rejects_battery_and_cannot_be_disabled(tmp_path) 
         run_workstation_preflight(
             {},
             ["192.168.1.2"],
-            power_supply_root=power_supply(tmp_path, online=False),
+            power_supply_root=power_supply(tmp_path, online=False, battery=True),
             runner=runner_for(),
         )
     with pytest.raises(WorkstationSafetyError, match="cannot disable"):
@@ -82,6 +87,45 @@ def test_workstation_preflight_rejects_battery_and_cannot_be_disabled(tmp_path) 
             power_supply_root=power_supply(tmp_path),
             runner=runner_for(),
         )
+
+
+def test_workstation_preflight_accepts_a_desktop_without_a_system_battery(
+    tmp_path,
+) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    report = run_workstation_preflight(
+        {}, ["192.168.1.3"], power_supply_root=empty, runner=runner_for()
+    )
+    assert report.power_supply == "mains-no-battery"
+
+    peripheral = tmp_path / "peripheral"
+    mouse = peripheral / "hidpp_battery_0"
+    mouse.mkdir(parents=True)
+    (mouse / "type").write_text("Battery\n", encoding="utf-8")
+    (mouse / "scope").write_text("Device\n", encoding="utf-8")
+    report = run_workstation_preflight(
+        {}, ["192.168.1.3"], power_supply_root=peripheral, runner=runner_for()
+    )
+    assert report.power_supply == "mains-no-battery"
+
+
+def test_workstation_preflight_still_requires_a_laptop_charger(tmp_path) -> None:
+    laptop = tmp_path / "laptop"
+    battery = laptop / "BAT0"
+    battery.mkdir(parents=True)
+    (battery / "type").write_text("Battery\n", encoding="utf-8")
+    with pytest.raises(WorkstationSafetyError, match="external AC"):
+        run_workstation_preflight(
+            {}, ["192.168.1.3"], power_supply_root=laptop, runner=runner_for()
+        )
+    report = run_workstation_preflight(
+        {},
+        ["192.168.1.3"],
+        power_supply_root=power_supply(laptop, battery=True),
+        runner=runner_for(),
+    )
+    assert report.power_supply == "AC"
 
 
 def test_workstation_checker_extracts_single_and_dual_robot_ips() -> None:
