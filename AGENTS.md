@@ -744,6 +744,7 @@ alone makes the mapping correct; validate each signed direction and rotation.
 | `TCP connection closed unexpectedly` on shutdown | Controller/driver connection loss. Attempt measured hold only if possible; tell user to cut power. |
 | `NameError: control is not defined` | Historical no-catch-up launcher regression; fixed. |
 | Calibration `missing ... hand` | Historical right-hand generalization regression; fixed and tested. |
+| Arm freezes about 5 s when the trigger is pressed while gripping, then re-anchors | Quest page started a wrist-calibration capture on the grip + trigger chord. Fixed 2026-10-23: calibration arms only from the Calibrate wrist button. Reload the Quest page to pick up the fix. |
 | `wrong Trossen driver for this arm profile: installed=1.8.6, required=1.9.3` | Launched from the retired `.venv-arm18`. Use `.venv-arm19`. No arm connection was attempted. |
 | `Trossen driver/firmware mismatch` | Driver and controller firmware major.minor differ. Install the matching driver; never downgrade firmware or loosen the gate. |
 
@@ -1997,17 +1998,57 @@ changing another variable.
   gripper never travelled below 38.2 mm. Gripper control and the cause of the
   pauses remain unconfirmed on 1.9.4.
 
+### 2026-10-23 — Gripper press no longer pauses teleop for 5 s
+
+- Symptom: during right-hand teleop, closing the gripper (trigger) while
+  clutched froze the arm for about 5 s, then it re-anchored and resumed. Seen
+  twice in `20261023-135529_right-solo-40pct-fw194-check` and once in
+  `20261023-155049_right-solo-40pct-fw194-run`.
+- Telemetry placed the stall on the Quest: the page's own capture timestamp
+  jumped 5,020 ms between consecutive sequence numbers while send, relay
+  arrival, and PC consume stayed sub-millisecond. The PC held because input
+  went stale, as designed.
+- Root cause in `web/client.js`: the right-hand single-arm wrist-calibration
+  chord is grip + trigger at 0.7, which is also clutch + close-gripper. The
+  page armed calibration automatically whenever no wrist offset was saved in
+  the headset, and a failed capture stayed armed. Each press therefore began a
+  5 s capture that sends no poses.
+- Fix: calibration arms only from the 2D **Calibrate wrist** button, and a
+  failed capture disarms with a retry message. Successful calibration, saved
+  offsets, the left-hand both-grips chord, and the bimanual per-hand chord are
+  otherwise unchanged.
+- `tests/test_quest_client_calibration.py` runs the real `client.js` in Node
+  (`tests/js/quest_client_harness.js`, fake DOM/WebXR/WebSocket, no network).
+  It reproduced the 600-frame silence before the fix and now pins continuous
+  streaming through grip + trigger for the right, left, and bimanual pages,
+  explicit-arm capture of about 5 s, disarm after failure, and saved-offset
+  application. Full `.venv-arm19` suite `308 passed`; full `.venv` suite
+  `307 passed, 1 skipped`. No arm was contacted.
+- Physical check after the fix (owner-operated, arm `.3`):
+  `runs/2026-10-23/20261023-155847_right-solo-40pct-gripper-fix` and
+  `runs/2026-10-23/20261023-160033_right-solo-40pct-gripper-fix`, each 4,050
+  rows over the full 45 s at 90.00 Hz with zero IK failures, every Quest
+  sequence unique and consecutive, and a largest Quest capture gap of
+  13.1 / 15.7 ms. In the second run the trigger was pressed six times while
+  gripping; the gripper was commanded 0–40 mm and reached 1.04 mm. Limiter
+  flags were gripper velocity/acceleration shaping only. Worst-joint feedback
+  error was 0.0089 rad p95 / 0.0180 rad maximum. The owner reports the gripper
+  now works.
+- The headset currently has no saved right wrist offset, so poses are reported
+  at the grip point rather than the wrist pivot. That may contribute to the
+  operator's roll/pitch observation; calibrate with the button before judging
+  rotation mapping.
+
 ## Next planned work
 
 1. Finish re-validating on firmware 1.9.4 with driver 1.9.3, with explicit
-   owner authorization for each step. Right arm `.3` solo at 40% Behind ran on
-   2026-10-23 and the owner reports it works. Still pending: the
-   trigger/gripper path and the two 5 s Quest pauses seen as the trigger was
-   pressed; the accepted Right/Mirror 50% profile on arm `.2` (not reachable
-   on the network on 2026-10-23); dual, leader/follower, and CAD. Keep the
-   25 ms horizon, feedforward, and 8 ms spacing unchanged until those
-   comparisons exist; only then judge whether 1.9's streaming behavior allows
-   retuning.
+   owner authorization for each step. Right arm `.3` solo at 40% Behind,
+   including full gripper control, ran on 2026-10-23 and the owner reports it
+   works. Still pending: right-hand wrist calibration and roll/pitch mapping;
+   the accepted Right/Mirror 50% profile on arm `.2` (not reachable on the
+   network on 2026-10-23); dual, leader/follower, and CAD. Keep the 25 ms
+   horizon, feedforward, and 8 ms spacing unchanged until those comparisons
+   exist; only then judge whether 1.9's streaming behavior allows retuning.
 2. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
 3. Measure transport RTT/clock offset and repeated controller/encoder reversal
    events before claiming physical p95/p99 latency.

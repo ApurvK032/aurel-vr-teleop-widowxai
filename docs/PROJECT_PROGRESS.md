@@ -10,7 +10,7 @@ stays under `runs/`; compact publishable metrics stay under `results/`.
 
 | Area | Status | Best evidence / performance | What it does not prove |
 |---|---|---|---|
-| Arm firmware / driver | Upgraded; right-arm solo re-checked | Both controllers flashed 1.8.3 → 1.9.4 on 2026-10-20; stored settings unchanged except a new zero `position_offset` per joint; project moved to driver 1.9.3 in `.venv-arm19`. Right arm `.3` solo at 40% Behind ran 1,965 rows at 90.00 Hz with zero IK failures on 2026-10-23, and the owner reports it works | Gripper/trigger use and two 5 s Quest pauses seen as the trigger was pressed are unresolved; every other physical result below was measured on firmware 1.8.3 / driver 1.8.6 and not yet repeated |
+| Arm firmware / driver | Upgraded; right-arm solo re-checked | Both controllers flashed 1.8.3 → 1.9.4 on 2026-10-20; stored settings unchanged except a new zero `position_offset` per joint; project moved to driver 1.9.3 in `.venv-arm19`. Right arm `.3` solo at 40% Behind with full gripper ran the full 45 s (4,050 rows at 90.00 Hz, zero IK failures, no input pauses) on 2026-10-23, and the owner reports it works | Right-hand wrist calibration and roll/pitch mapping are not yet tuned; every other physical result below was measured on firmware 1.8.3 / driver 1.8.6 and not yet repeated |
 | Single-arm Quest teleoperation | Accepted baseline | Right controller + Mirrored at 50% task scale; latest accepted run 4,627 rows over 51.398 s at 90.003 Hz with zero IK failures | The other three hand/mapping combinations are not accepted at this scale |
 | Single-arm response | Accepted as smooth and responsive | Approximately 30 ms estimated controller-capture-to-encoder response from software/driver telemetry | Not a synchronized high-speed-camera measurement |
 | Bimanual Quest transport | Physically exercised and direction-accepted | Schema-v2 packets drove both arms together for 3,786 rows at 89.874 Hz overall; the operator confirmed correct response in every direction | Transport evidence does not validate Mirrored/front-facing mode or dual grippers |
@@ -200,10 +200,11 @@ implementation and evidence are ahead of their tracker state:
   toggles, overview/focus cycling, and world-anchored transitions. Remaining
   closure work is glass-to-glass latency, active pose-rate impact, and a
   camera-loss hold policy.
-- **#4 calibration/reach UX:** still outstanding. Bimanual Apply input still
-  disarms calibration until the 2D Calibrate wrist button is pressed, and the
-  headset does not persistently show per-hand calibration, clutch, or near-limit
-  state.
+- **#4 calibration/reach UX:** still outstanding. Wrist calibration now arms
+  only from the 2D Calibrate wrist button in every mode (2026-10-23: the
+  right-hand page had auto-armed it, so closing the gripper while clutched
+  paused streaming for 5 s). The headset still does not persistently show
+  per-hand calibration, clutch, or near-limit state.
 
 ## Recommended next milestone
 
