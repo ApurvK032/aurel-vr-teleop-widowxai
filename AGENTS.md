@@ -1956,16 +1956,58 @@ changing another variable.
   smoothness, vibration, tracking error, and latency must be re-measured before
   any profile is relied on or retuned.
 
+### 2026-10-23 — Right-arm solo startup uses the accepted marginal-start rule
+
+- With the left arm removed from the bench, the owner ran
+  `right_dual_bench_40pct_full_gripper_hardware.yaml` on arm `.3` without the
+  stationary-arm guard. Workstation, Quest, official discovery, and connect
+  passed (driver `v1.9.3`, firmware `v1.9.4`, measured rest
+  `[-0.001, -0.004, -0.007, -0.012, 0.002, -0.0]` rad). The unguarded startup
+  screen then stopped before position mode: the known near-rest
+  `link_2`/`link_4` model overlap, 0.825 mm at this pose, which clears by 0.4%
+  toward home, never deepens, and never re-enters. No command was sent.
+- The guarded path already applied the 2026-08-12 owner-accepted 2 mm
+  marginal-start rule; the unguarded path used zero-tolerance
+  `first_self_collision_on_path`. With explicit owner approval, the rule now
+  lives in one shared `one_arm_safety.screen_self_collision_path`, used by
+  `screen_selected_path` (unchanged behavior and messages) and by the solo
+  startup ramp. The solo return-to-rest, gripper, and in-loop collision checks
+  remain zero-tolerance.
+- `tests/test_solo_startup_screen.py` pins the measured pose acceptance, the
+  2 mm limit, and rejection with no allowance, from a clear start, above 2 mm,
+  on deepening, and when the contact never clears. It also pins that
+  return-to-rest from a contact start still fails closed.
+- Verification: full `.venv-arm19` suite `303 passed`; full `.venv` suite
+  `302 passed, 1 skipped`; `git diff --check` clean. No arm was contacted for
+  this change.
+- Physical check afterwards (owner-operated, arm `.3` only):
+  `runs/2026-10-23/20261023-135529_right-solo-40pct-fw194-check` (1,142 rows
+  over 22.699 s, 921 active, zero IK failures) and
+  `runs/2026-10-23/20261023-135621_right-solo-40pct-fw194-check` (1,965 rows
+  over 21.822 s at 90.00 Hz, 1,748 active, zero IK failures, zero limiter
+  flags, every Quest sequence unique and consecutive). The owner reports the
+  right-arm teleop works on firmware 1.9.4.
+- In the clean run, worst-joint feedback error was 0.0108 rad p95 / 0.0201 rad
+  maximum (2026-08-12 on 1.8.3: 0.0052 / 0.0101), far below the unchanged
+  0.080 rad stop.
+- The first run had two 5.02 s Quest input pauses with no lost sequence
+  numbers. Each time the stream went stale, the clutch dropped, no command was
+  sent, and motion resumed only after a re-anchor. Both pauses began just as
+  the trigger was pressed; the clean run did not use the trigger, and the
+  gripper never travelled below 38.2 mm. Gripper control and the cause of the
+  pauses remain unconfirmed on 1.9.4.
+
 ## Next planned work
 
-1. Re-validate on firmware 1.9.4 with driver 1.9.3, with explicit owner
-   authorization for each step: a no-motion preflight of each arm (expect
-   driver 1.9.3, firmware 1.9.4, near-zero rest feedback), one single-arm
-   rest/home/rest cycle, then a short supervised run of the accepted
-   Right/Mirror 50% profile. Keep the 25 ms horizon, feedforward, and 8 ms
-   spacing unchanged for the first comparison against the 1.8 evidence; only
-   then judge whether 1.9's streaming behavior allows retuning. Repeat for the
-   dual, leader/follower, and CAD paths before relying on them.
+1. Finish re-validating on firmware 1.9.4 with driver 1.9.3, with explicit
+   owner authorization for each step. Right arm `.3` solo at 40% Behind ran on
+   2026-10-23 and the owner reports it works. Still pending: the
+   trigger/gripper path and the two 5 s Quest pauses seen as the trigger was
+   pressed; the accepted Right/Mirror 50% profile on arm `.2` (not reachable
+   on the network on 2026-10-23); dual, leader/follower, and CAD. Keep the
+   25 ms horizon, feedforward, and 8 ms spacing unchanged until those
+   comparisons exist; only then judge whether 1.9's streaming behavior allows
+   retuning.
 2. Preserve the accepted Right/Mirror 50% profile as the single-arm baseline.
 3. Measure transport RTT/clock offset and repeated controller/encoder reversal
    events before claiming physical p95/p99 latency.

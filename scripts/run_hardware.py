@@ -34,6 +34,7 @@ from widowxai_quest_teleop.one_arm_safety import (
     cross_arm_separation,
     screen_gripper_path,
     screen_selected_path,
+    screen_self_collision_path,
 )
 from widowxai_quest_teleop.motion_limiter import (
     VelocityFeedforwardFilter,
@@ -876,17 +877,27 @@ def main() -> None:
                 f"minimum separation {min(startup_separation, return_separation):.3f} m"
             )
         else:
-            collision_alpha = model.first_self_collision_on_path(
-                state.q_arm,
-                home_q,
-                start_gripper_q=state.gripper_position_m,
-                end_gripper_q=state.gripper_position_m,
-                samples=hardware["startup_collision_samples"],
-            )
-            if collision_alpha is not None:
+            # Same owner-accepted marginal-start rule as the guarded path: a
+            # measured rest contact up to 2 mm must never deepen, must clear,
+            # and must never return; every other contact still fails closed.
+            try:
+                start_depth, cleared_at = screen_self_collision_path(
+                    model,
+                    start_q=state.q_arm,
+                    end_q=home_q,
+                    start_gripper_m=state.gripper_position_m,
+                    samples=int(hardware["startup_collision_samples"]),
+                    label=f"arm {robot_ip}",
+                    allow_marginal_start_m=MARGINAL_START_CONTACT_M,
+                )
+            except HardwareSafetyError as exc:
                 raise HardwareSafetyError(
-                    "pinned 2025 MuJoCo collision geometry rejects the startup ramp "
-                    f"near {collision_alpha * 100:.1f}%"
+                    f"pinned 2025 MuJoCo collision geometry rejects the startup ramp: {exc}"
+                ) from None
+            if cleared_at is not None:
+                print(
+                    f"preflight: measured {start_depth * 1000:.3f} mm rest contact never "
+                    f"deepens and clears by {cleared_at * 100:.1f}% toward home"
                 )
         startup_max_delta = np.asarray(
             hardware.get("startup_max_joint_delta_rad", max_delta),
